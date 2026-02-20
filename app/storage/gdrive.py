@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import httpx
@@ -19,17 +20,18 @@ class GDriveStorageProvider(StorageProvider):
         }
 
         headers = {"Authorization": f"Bearer {settings.gdrive_access_token}"}
-        files = {
-            "metadata": (None, __import__("json").dumps(metadata), "application/json"),
-            "file": (remote_name, local_path.open("rb"), "application/octet-stream"),
-        }
-        async with httpx.AsyncClient(timeout=40) as client:
-            res = await client.post(
-                "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
-                headers=headers,
-                files=files,
-            )
-            res.raise_for_status()
-            payload = res.json()
+        with local_path.open("rb") as file_handle:
+            files = {
+                "metadata": (None, json.dumps(metadata), "application/json"),
+                "file": (remote_name, file_handle, "application/octet-stream"),
+            }
+            async with httpx.AsyncClient(timeout=40) as client:
+                res = await client.post(
+                    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+                    headers=headers,
+                    files=files,
+                )
+                res.raise_for_status()
+                payload = res.json()
 
         return f"gdrive://{payload.get('id', remote_name)}"

@@ -57,8 +57,9 @@ async def archive(
     files = {
         "raw_html": artifact.raw_html_path,
         "rendered_html": artifact.rendered_html_path,
-        "screenshot": artifact.screenshot_path,
     }
+    if artifact.screenshot_path.exists() and artifact.screenshot_path.stat().st_size > 0:
+        files["screenshot"] = artifact.screenshot_path
 
     for provider in providers:
         uploads[provider.name] = {}
