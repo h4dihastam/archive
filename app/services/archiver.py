@@ -1,6 +1,8 @@
 """
-Archiver — برای X.com از nitter استفاده می‌کنه که محتوای واقعی داره.
-برای بقیه سایت‌ها httpx با stealth headers.
+Archiver:
+1. برای X.com: از Wayback Machine CDX API استفاده می‌کنه
+2. اگه نبود: به save.org می‌فرسته تا آرشیو کنه
+3. برای بقیه سایت‌ها: مستقیم fetch
 """
 from __future__ import annotations
 
@@ -8,7 +10,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus
 
 import httpx
 
@@ -27,14 +29,6 @@ STEALTH_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-# nitter instances (آینه‌های توییتر که بدون JS کار می‌کنن)
-NITTER_INSTANCES = [
-    "https://nitter.net",
-    "https://nitter.privacydev.net",
-    "https://nitter.poast.org",
-    "https://lightbrd.com",
-]
-
 
 def _safe_slug(url: str) -> str:
     parsed = urlparse(url)
@@ -44,79 +38,108 @@ def _safe_slug(url: str) -> str:
     return f"{host}_{path}_{ts}"
 
 
-def _twitter_to_nitter_path(url: str) -> str | None:
-    """تبدیل لینک X.com/Twitter به path برای nitter"""
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
-    if any(x in host for x in ["x.com", "twitter.com"]):
-        return parsed.path  # مثلاً /username/status/123
-    return None
+def _is_twitter(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return any(x in host for x in ["x.com", "twitter.com"])
 
 
-def _extract_tweet_content(html: str, original_url: str) -> str:
-    """یه HTML تمیز از محتوای nitter می‌سازه"""
-    # پیدا کردن متن توییت
-    tweet_match = re.search(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
-    tweet_text = ""
-    if tweet_match:
-        tweet_text = re.sub(r'<[^>]+>', '', tweet_match.group(1)).strip()
-
-    # پیدا کردن تصاویر
-    images = re.findall(r'<img[^>]+src="([^"]*pic[^"]*)"', html)
-    img_tags = ""
-    for img in images[:4]:
-        if img.startswith("/"):
-            img = f"https://nitter.net{img}"
-        img_tags += f'<img src="{img}" style="max-width:100%;margin:8px 0;border-radius:8px;" /><br/>'
-
-    # پیدا کردن اطلاعات کاربر
-    user_match = re.search(r'<a class="fullname"[^>]*>([^<]+)</a>', html)
-    username_match = re.search(r'<a class="username"[^>]*>([^<]+)</a>', html)
-    date_match = re.search(r'<span class="tweet-date"[^>]*><a[^>]*>([^<]+)</a>', html)
-
-    user = user_match.group(1) if user_match else ""
-    username = username_match.group(1) if username_match else ""
-    date = date_match.group(1) if date_match else ""
-
+def _make_archive_html(url: str, content: str, source: str = "") -> str:
+    source_note = f"<small>منبع داده: {source}</small>" if source else ""
     return f"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Archive — {original_url}</title>
+<title>Archive — {url}</title>
 <style>
-body{{font-family:Tahoma,sans-serif;background:#f0f4f8;margin:0;padding:16px;}}
-.banner{{background:#1d4ed8;color:#fff;padding:10px 16px;border-radius:8px;margin-bottom:16px;font-size:13px;}}
+body{{font-family:Tahoma,sans-serif;background:#f0f4f8;margin:0;padding:0;}}
+.banner{{background:#1d4ed8;color:#fff;padding:10px 16px;font-size:13px;}}
 .banner a{{color:#93c5fd;}}
-.card{{background:#fff;border-radius:16px;padding:20px;max-width:600px;margin:0 auto;
-       box-shadow:0 4px 20px rgba(0,0,0,.08);}}
-.user{{display:flex;align-items:center;gap:10px;margin-bottom:12px;}}
-.fullname{{font-weight:bold;font-size:16px;}}
-.username{{color:#666;font-size:14px;}}
-.date{{color:#888;font-size:12px;margin-bottom:12px;}}
-.content{{font-size:16px;line-height:1.6;white-space:pre-wrap;word-break:break-word;}}
-.images{{margin-top:12px;}}
-.source{{margin-top:16px;padding-top:12px;border-top:1px solid #eee;font-size:12px;color:#888;}}
+.content{{max-width:800px;margin:16px auto;background:#fff;border-radius:12px;
+          padding:20px;box-shadow:0 2px 12px rgba(0,0,0,.08);}}
 </style>
 </head>
 <body>
 <div class="banner">
-  📦 Archive Hub — آرشیو از <a href="{original_url}">{original_url}</a>
+  📦 Archive Hub — <a href="{url}">{url}</a> {source_note}
 </div>
-<div class="card">
-  <div class="user">
-    <div>
-      <div class="fullname">{user}</div>
-      <div class="username">{username}</div>
-    </div>
-  </div>
-  <div class="date">{date}</div>
-  <div class="content">{tweet_text}</div>
-  <div class="images">{img_tags}</div>
-  <div class="source">منبع: <a href="{original_url}">{original_url}</a></div>
-</div>
+<div class="content">{content}</div>
 </body>
 </html>"""
+
+
+async def _try_wayback(url: str, client: httpx.AsyncClient) -> str | None:
+    """آخرین snapshot از Wayback Machine CDX API بگیر"""
+    try:
+        cdx = (
+            f"https://web.archive.org/cdx/search/cdx"
+            f"?url={quote_plus(url)}&output=json&limit=1&fl=timestamp&filter=statuscode:200"
+            f"&from=20200101&to=20991231"
+        )
+        r = await client.get(cdx, timeout=15)
+        data = r.json()
+        if len(data) < 2:
+            return None
+        ts = data[1][0]
+        wayback_url = f"https://web.archive.org/web/{ts}/{url}"
+        logger.info("Found wayback snapshot: %s", wayback_url)
+        r2 = await client.get(wayback_url, timeout=20)
+        if r2.status_code == 200:
+            return r2.text
+    except Exception as e:
+        logger.warning("Wayback failed: %s", e)
+    return None
+
+
+async def _try_save_to_wayback(url: str, client: httpx.AsyncClient) -> str | None:
+    """URL رو به Wayback Machine بفرست تا save کنه، لینک برگردون"""
+    try:
+        save_url = f"https://web.archive.org/save/{url}"
+        r = await client.get(save_url, timeout=30)
+        # Wayback Machine بعد از save به /web/timestamp/url redirect می‌کنه
+        if r.url and "web.archive.org/web/" in str(r.url):
+            return str(r.url)
+        # یا از header Content-Location بگیر
+        loc = r.headers.get("Content-Location", "")
+        if loc:
+            return f"https://web.archive.org{loc}"
+    except Exception as e:
+        logger.warning("Save to Wayback failed: %s", e)
+    return None
+
+
+async def _parse_tweet_from_wayback(html: str, original_url: str) -> str:
+    """محتوای توییت رو از HTML Wayback Machine استخراج کن"""
+    # پیدا کردن متن اصلی توییت
+    patterns = [
+        r'<div[^>]*data-testid="tweetText"[^>]*>(.*?)</div>',
+        r'<p[^>]*class="[^"]*TweetText[^"]*"[^>]*>(.*?)</p>',
+        r'"full_text"\s*:\s*"([^"]{10,})"',
+    ]
+    
+    tweet_text = ""
+    for pat in patterns:
+        m = re.search(pat, html, re.DOTALL)
+        if m:
+            tweet_text = re.sub(r'<[^>]+>', ' ', m.group(1)).strip()
+            tweet_text = re.sub(r'\s+', ' ', tweet_text)
+            break
+
+    # username
+    user_m = re.search(r'"screen_name"\s*:\s*"([^"]+)"', html)
+    username = f"@{user_m.group(1)}" if user_m else ""
+
+    if tweet_text:
+        return f"""
+        <div style="border:1px solid #e5e7eb;border-radius:12px;padding:16px;max-width:550px;margin:0 auto;">
+          <div style="font-weight:bold;margin-bottom:8px;">{username}</div>
+          <div style="font-size:18px;line-height:1.6;">{tweet_text}</div>
+          <div style="margin-top:12px;font-size:12px;color:#888;">
+            <a href="{original_url}">{original_url}</a>
+          </div>
+        </div>"""
+    else:
+        return f'<p>محتوا استخراج نشد. <a href="{original_url}">لینک اصلی</a></p>'
 
 
 class Archiver:
@@ -128,9 +151,9 @@ class Archiver:
         raw_html_path = folder / "raw.html"
         rendered_html_path = folder / "archive.html"
         screenshot_path = folder / "screenshot.png"
-        screenshot_path.write_bytes(b"")  # خالی پیش‌فرض
+        screenshot_path.write_bytes(b"")
 
-        nitter_path = _twitter_to_nitter_path(url)
+        wayback_link = ""  # لینک Wayback Machine برای نمایش
 
         async with httpx.AsyncClient(
             timeout=settings.request_timeout,
@@ -138,63 +161,58 @@ class Archiver:
             headers=STEALTH_HEADERS,
         ) as client:
 
-            if nitter_path:
-                # ── X.com/Twitter: از nitter استفاده کن ─────────────────────
-                html = None
-                for instance in NITTER_INSTANCES:
-                    nitter_url = f"{instance}{nitter_path}"
-                    try:
-                        logger.info("Trying nitter: %s", nitter_url)
-                        r = await client.get(nitter_url, timeout=15)
-                        if r.status_code == 200 and "tweet-content" in r.text:
-                            html = r.text
-                            logger.info("Got content from %s", instance)
-                            break
-                    except Exception as e:
-                        logger.warning("Nitter %s failed: %s", instance, e)
+            if _is_twitter(url):
+                # ── استراتژی برای X.com ───────────────────────────────────
 
-                if html:
-                    raw_html_path.write_text(html, encoding="utf-8")
-                    archive_html = _extract_tweet_content(html, url)
+                # ۱. ابتدا از Wayback بگیر
+                raw_html = await _try_wayback(url, client)
+
+                if raw_html:
+                    raw_html_path.write_text(raw_html, encoding="utf-8")
+                    content = await _parse_tweet_from_wayback(raw_html, url)
+                    archive_html = _make_archive_html(url, content, "Wayback Machine")
                     rendered_html_path.write_text(archive_html, encoding="utf-8")
                 else:
-                    # fallback: مستقیم از X.com بگیر
-                    logger.warning("All nitter instances failed, trying direct fetch")
-                    try:
-                        r = await client.get(url)
-                        raw_html_path.write_text(r.text, encoding="utf-8")
-                        rendered_html_path.write_text(
-                            f"""<!DOCTYPE html><html><head><meta charset="UTF-8"/>
-                            <title>Archive</title></head><body>
-                            <div style="background:#1d4ed8;color:#fff;padding:10px;">
-                            📦 Archive Hub — <a href="{url}" style="color:#93c5fd">{url}</a></div>
-                            {r.text}</body></html>""",
-                            encoding="utf-8",
-                        )
-                    except Exception as e:
-                        raw_html_path.write_text(f"<!-- fetch failed: {e} -->", encoding="utf-8")
-                        rendered_html_path.write_text(
-                            f'<html><body><p>آرشیو ناموفق: {e}</p><p><a href="{url}">{url}</a></p></body></html>',
-                            encoding="utf-8",
-                        )
+                    # ۲. بفرست Wayback تا save کنه
+                    logger.info("No wayback snapshot, saving now...")
+                    wayback_link = await _try_save_to_wayback(url, client)
+                    
+                    if wayback_link:
+                        # بعد از save دوباره fetch کن
+                        try:
+                            r = await client.get(wayback_link, timeout=20)
+                            raw_html = r.text
+                            raw_html_path.write_text(raw_html, encoding="utf-8")
+                            content = await _parse_tweet_from_wayback(raw_html, url)
+                        except Exception:
+                            content = f'<p>آرشیو در Wayback Machine ذخیره شد.</p><p><a href="{wayback_link}">مشاهده در Wayback Machine</a></p>'
+                    else:
+                        content = f"""
+                        <div style="padding:20px;text-align:center;">
+                          <p>⚠️ محتوای پست در دسترس نبود.</p>
+                          <p>لینک اصلی: <a href="{url}">{url}</a></p>
+                          <p><a href="https://web.archive.org/web/*/{url}">جستجو در Wayback Machine</a></p>
+                        </div>"""
+                        raw_html_path.write_text("<!-- not available -->", encoding="utf-8")
+
+                    archive_html = _make_archive_html(url, content, wayback_link or "")
+                    rendered_html_path.write_text(archive_html, encoding="utf-8")
+
             else:
-                # ── سایر سایت‌ها ─────────────────────────────────────────────
+                # ── سایر سایت‌ها ─────────────────────────────────────────
                 try:
                     r = await client.get(url)
                     r.raise_for_status()
                     raw_html_path.write_text(r.text, encoding="utf-8")
                     rendered_html_path.write_text(
-                        f'<html><head><meta charset="UTF-8"/></head><body>'
-                        f'<div style="background:#1d4ed8;color:#fff;padding:10px;">'
-                        f'📦 Archive Hub — <a href="{url}" style="color:#93c5fd">{url}</a></div>'
-                        f'{r.text}</body></html>',
+                        _make_archive_html(url, r.text),
                         encoding="utf-8",
                     )
                 except Exception as e:
                     logger.error("Fetch failed: %s", e)
                     raw_html_path.write_text(f"<!-- fetch failed: {e} -->", encoding="utf-8")
                     rendered_html_path.write_text(
-                        f'<html><body><p>آرشیو ناموفق: {e}</p></body></html>',
+                        _make_archive_html(url, f"<p>آرشیو ناموفق: {e}</p>"),
                         encoding="utf-8",
                     )
 
