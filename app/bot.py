@@ -36,6 +36,8 @@ BTN_ADMIN_LIST = "📊 لیست همه آرشیوها"
 BTN_ADMIN_USERS = "👥 لیست کاربران"
 BTN_ADMIN_DELETE = "🗑 حذف آرشیو"
 BTN_BACK = "🔙 برگشت"
+BTN_ADMIN_STATS = "📈 آمار و حجم"
+BTN_ADMIN_STATS = "📈 آمار و حجم"
 
 
 # ── Telegram helpers ──────────────────────────────────────────────────────────
@@ -100,6 +102,7 @@ def admin_kbd() -> dict:
     return {"keyboard": [
         [{"text": BTN_ADMIN_LIST}],
         [{"text": BTN_ADMIN_USERS}, {"text": BTN_ADMIN_DELETE}],
+        [{"text": BTN_ADMIN_STATS}],
         [{"text": BTN_BACK}],
     ], "resize_keyboard": True}
 
@@ -229,6 +232,42 @@ async def db_delete_archive(archive_id: str) -> bool:
         return False
 
 
+async def db_get_stats() -> dict:
+    """آمار کلی دیتابیس"""
+    sb = get_supabase()
+    if not sb:
+        return {}
+    stats = {}
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            headers = {"apikey": sb.key, "Authorization": f"Bearer {sb.key}",
+                       "Accept": "application/json"}
+            # تعداد آرشیوها
+            r = await c.get(f"{sb.base}/rest/v1/archives",
+                            headers={**headers, "Prefer": "count=exact"},
+                            params={"select": "id", "limit": "1"})
+            stats["archives"] = int(r.headers.get("content-range", "0/0").split("/")[-1])
+
+            # تعداد کاربران
+            r2 = await c.get(f"{sb.base}/rest/v1/bot_users",
+                             headers={**headers, "Prefer": "count=exact"},
+                             params={"select": "user_id", "limit": "1"})
+            stats["users"] = int(r2.headers.get("content-range", "0/0").split("/")[-1])
+
+            # حجم Storage از Supabase API
+            r3 = await c.get(
+                f"{sb.base}/storage/v1/bucket/{sb.bucket}",
+                headers=headers,
+            )
+            if r3.is_success:
+                bdata = r3.json()
+                stats["bucket_size"] = bdata.get("size", 0)
+                stats["bucket_file_count"] = bdata.get("file_count", 0)
+    except Exception as e:
+        logger.warning("db_get_stats: %s", e)
+    return stats
+
+
 # ── Main handler ──────────────────────────────────────────────────────────────
 
 async def handle_update(update: dict) -> None:
@@ -285,9 +324,16 @@ async def handle_update(update: dict) -> None:
             url = r.get("url", "")
             aid = r.get("id", "")
             date = (r.get("created_at") or "")[:10]
-            link = f"{base}/view/{aid}" if base else aid
-            lines.append(f"{i}. {date}\n🔗 {url}\n📎 {link}")
-        await msg(chat_id, "📋 <b>آرشیوهای تو:</b>\n\n" + "\n\n".join(lines), kbd=user_menu_kbd(user_id))
+            link = (base + "/view/" + aid) if base else aid
+            author = r.get("post_author", "") or r.get("post_username", "")
+            uname = r.get("post_username", "")
+            author_line = ""
+            if uname:
+                author_line = "\n👤 " + (author + " (@" + uname + ")" if author and author != uname else "@" + uname)
+            elif author:
+                author_line = "\n👤 " + author
+            lines.append(str(i) + ". " + date + author_line + "\n🔗 " + url + "\n📎 " + link)
+        await msg(chat_id, "📋 آرشیوهای تو:\n\n" + "\n\n".join(lines), kbd=user_menu_kbd(user_id))
         return
 
     if text == BTN_CHAN:
@@ -325,12 +371,14 @@ async def handle_update(update: dict) -> None:
         lines = []
         for i, r in enumerate(rows, 1):
             url = r.get("url", "")[:50]
-            aid = r.get("id", "")[:8]
-            uname = r.get("saved_by_username", "") or str(r.get("saved_by_user_id", ""))
+            aid = (r.get("id", "") or "")[:8]
+            saved_by = r.get("saved_by_username", "") or str(r.get("saved_by_user_id", ""))
+            post_uname = r.get("post_username", "")
             date = (r.get("created_at") or "")[:10]
-            view = f"{base}/view/{r.get('id','')}" if base else ""
-            lines.append(f"{i}. [{aid}] {date}\n👤 @{uname}\n🔗 {url}\n📎 {view}")
-        await msg(chat_id, "📊 <b>آخرین ۲۰ آرشیو:</b>\n\n" + "\n\n".join(lines), kbd=admin_kbd())
+            view = (base + "/view/" + (r.get("id") or "")) if base else ""
+            post_info = (" | پست: @" + post_uname) if post_uname else ""
+            lines.append(str(i) + ". [" + aid + "] " + date + "\n💾 ذخیره: @" + saved_by + post_info + "\n🔗 " + url + "\n📎 " + view)
+        await msg(chat_id, "آخرین 20 آرشیو:\n\n" + "\n\n".join(lines), kbd=admin_kbd())
         return
 
     if text == BTN_ADMIN_USERS and is_admin(user_id):
@@ -349,12 +397,75 @@ async def handle_update(update: dict) -> None:
         await msg(chat_id, "👥 <b>کاربران:</b>\n\n" + "\n\n".join(lines), kbd=admin_kbd())
         return
 
+    if text == BTN_ADMIN_STATS and is_admin(user_id):
+        stats = await db_get_stats()
+        archives = stats.get("archives", "?")
+        users = stats.get("users", "?")
+        size_bytes = stats.get("bucket_size", 0)
+        files = stats.get("bucket_file_count", "?")
+
+        # تبدیل حجم
+        if isinstance(size_bytes, (int, float)) and size_bytes > 0:
+            if size_bytes > 1024**3:
+                size_str = f"{size_bytes/1024**3:.2f} GB"
+            elif size_bytes > 1024**2:
+                size_str = f"{size_bytes/1024**2:.2f} MB"
+            elif size_bytes > 1024:
+                size_str = f"{size_bytes/1024:.1f} KB"
+            else:
+                size_str = f"{size_bytes} B"
+        else:
+            size_str = "نامشخص"
+
+        stats_text = (
+            "<b>📈 آمار دیتابیس</b>\n\n"
+            f"🗄 تعداد آرشیوها: <b>{archives}</b>\n"
+            f"👥 تعداد کاربران: <b>{users}</b>\n"
+            f"📁 فایل‌های Storage: <b>{files}</b>\n"
+            f"💾 حجم Storage: <b>{size_str}</b>"
+        )
+        await msg(chat_id, stats_text, kbd=admin_kbd())
+        return
+
     if text == BTN_ADMIN_DELETE and is_admin(user_id):
         st["state"] = S_ADMIN_DELETE
         await msg(chat_id,
                   "🗑 <b>حذف آرشیو</b>\n\n"
                   "شناسه آرشیو (UUID) را بفرستید.\n"
                   "از لیست آرشیوها می‌تونی کپی کنی.\n\n/cancel برای لغو")
+        return
+
+    if text == BTN_ADMIN_STATS and is_admin(user_id):
+        sb = get_supabase()
+        if not sb:
+            await msg(chat_id, "Supabase تنظیم نشده.", kbd=admin_kbd())
+            return
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                headers = {"apikey": sb.key, "Authorization": "Bearer " + sb.key}
+
+                r1 = await c.get(sb.base + "/rest/v1/archives",
+                                 headers={**headers, "Prefer": "count=exact",
+                                          "Range-Unit": "items", "Range": "0-0"})
+                total_archives = r1.headers.get("content-range", "?/?").split("/")[-1]
+
+                r2 = await c.get(sb.base + "/rest/v1/bot_users",
+                                 headers={**headers, "Prefer": "count=exact",
+                                          "Range-Unit": "items", "Range": "0-0"})
+                total_users = r2.headers.get("content-range", "?/?").split("/")[-1]
+
+            lines = [
+                "آمار دیتابیس",
+                "",
+                "آرشیوها: " + str(total_archives),
+                "کاربران: " + str(total_users),
+                "",
+                "حجم Storage را در Supabase Dashboard بررسی کنید.",
+            ]
+            text_out = "\n".join(lines)
+            await msg(chat_id, text_out, kbd=admin_kbd())
+        except Exception as e:
+            await msg(chat_id, "خطا: " + str(e), kbd=admin_kbd())
         return
 
     # ── States ────────────────────────────────────────────────────────────

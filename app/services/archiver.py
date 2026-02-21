@@ -160,6 +160,8 @@ class Archiver:
             screenshot_bytes = await _get_screenshot_bytes(url, client)
             screenshot_path.write_bytes(screenshot_bytes)
 
+            _post_meta = {}
+
             if _is_twitter(url):
                 # ── X.com: از microlink محتوا بگیر ──────────────────────────
                 meta = await _get_microlink(url, client)
@@ -170,21 +172,33 @@ class Archiver:
                 publisher = meta.get("publisher", "")
                 date = meta.get("date", "")
 
+                # استخراج username از title (معمولاً "Name (@username) on X")
+                username = ""
+                import re as _re2
+                um = _re2.search(r'\(@([^)]+)\)', title)
+                if um:
+                    username = um.group(1)
+
+                _post_meta = {
+                    "title": title,
+                    "author": author or publisher,
+                    "username": username,
+                    "date": date,
+                    "description": description,
+                }
+
                 # محتوای اصلی
-                content = description or title or f"<p>محتوا استخراج نشد.</p>"
-                
-                # حذف HTML tags از description
+                content = description or title or "<p>محتوا استخراج نشد.</p>"
                 content = re.sub(r'<[^>]+>', '', content)
 
-                # ساخت raw.html
-                raw_data = f"URL: {url}\nTitle: {title}\nAuthor: {author}\nDate: {date}\nContent: {description}"
+                raw_data = "URL: " + url + "\nTitle: " + title + "\nAuthor: " + author + "\nDate: " + date + "\nContent: " + description
                 raw_html_path.write_text(raw_data, encoding="utf-8")
 
                 archive_html = _make_archive_html(
                     url=url,
                     content=content,
                     title=title,
-                    author=f"{author} ({publisher})" if publisher and publisher != author else author,
+                    author=(author + " (" + publisher + ")") if publisher and publisher != author else author,
                     date=date,
                 )
                 rendered_html_path.write_text(archive_html, encoding="utf-8")
@@ -202,6 +216,7 @@ class Archiver:
                     description = meta.get("description", "")
                     author = meta.get("author", "")
                     date = meta.get("date", "")
+                    _post_meta = {"title": title, "author": author, "date": date}
 
                     if description:
                         content = re.sub(r'<[^>]+>', '', description)
@@ -230,4 +245,5 @@ class Archiver:
             raw_html_path=raw_html_path,
             rendered_html_path=rendered_html_path,
             screenshot_path=screenshot_path,
+            post_meta=_post_meta,
         )

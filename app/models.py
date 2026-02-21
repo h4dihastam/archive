@@ -9,7 +9,8 @@ class ArchiveArtifact:
     created_at: datetime
     folder: Path
     raw_html_path: Path
-    rendered_html_path: Path    # SingleFile-style self-contained HTML
+    rendered_html_path: Path
     screenshot_path: Path
-    archive_id: str = ""        # UUID stored in DB
-    public_url: str = ""        # /view/{archive_id}
+    archive_id: str = ""
+    public_url: str = ""
+    post_meta: dict = None      # اطلاعات پست: author, username, date, title

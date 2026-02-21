@@ -111,6 +111,9 @@ async def save_archive(artifact) -> str:
         except Exception as e:
             logger.warning("Raw upload failed: %s", e)
 
+    # اطلاعات پست توییتر از artifact
+    post_meta = getattr(artifact, 'post_meta', {}) or {}
+
     row = {
         "id": archive_id,
         "url": artifact.url,
@@ -118,8 +121,12 @@ async def save_archive(artifact) -> str:
         "screenshot_url": screenshot_url,
         "html_url": html_url,
         "raw_url": raw_url,
-        "title": "",
+        "title": post_meta.get("title", ""),
         "folder": str(artifact.folder),
+        "post_author": post_meta.get("author", ""),
+        "post_username": post_meta.get("username", ""),
+        "post_date": post_meta.get("date", ""),
+        "post_title": post_meta.get("title", ""),
     }
     
     try:
