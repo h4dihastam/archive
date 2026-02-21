@@ -50,28 +50,32 @@ async def _get_screenshot_bytes(url: str, client: httpx.AsyncClient) -> bytes:
     """
     encoded = quote(url, safe="")
     
-    # ۱. screenshotmachine با key رایگان
+    # ۱. screenshotmachine — برای سایت‌های عادی خوبه
     sm_key = settings.screenshot_machine_key
     if sm_key:
         try:
-            sm_url = f"https://api.screenshotmachine.com/?key={sm_key}&url={encoded}&dimension=1280x900&format=png&delay=3000"
-            r = await client.get(sm_url, timeout=40)
-            if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
+            sm_url = f"https://api.screenshotmachine.com/?key={sm_key}&url={encoded}&dimension=1280x900&format=png&delay=4000&hide=cookie-banners"
+            r = await client.get(sm_url, timeout=45)
+            ct = r.headers.get("content-type", "")
+            if r.status_code == 200 and ct.startswith("image") and len(r.content) > 5000:
                 logger.info("Screenshot from screenshotmachine: %d bytes", len(r.content))
                 return r.content
+            else:
+                logger.warning("screenshotmachine returned non-image or tiny: %s %d bytes", ct, len(r.content))
         except Exception as e:
             logger.warning("screenshotmachine failed: %s", e)
 
-    # ۲. thum.io به عنوان fallback
+    # ۲. thum.io fallback
     try:
-        thumb_url = f"https://image.thum.io/get/width/1280/crop/900/noanimate/{encoded}"
+        thumb_url = f"https://image.thum.io/get/width/1280/crop/900/noanimate/allowJPG/{encoded}"
         r = await client.get(thumb_url, timeout=30)
-        if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
+        ct = r.headers.get("content-type", "")
+        if r.status_code == 200 and ct.startswith("image") and len(r.content) > 5000:
             logger.info("Screenshot from thum.io: %d bytes", len(r.content))
             return r.content
     except Exception as e:
         logger.warning("thum.io failed: %s", e)
-    
+
     return b""
 
 

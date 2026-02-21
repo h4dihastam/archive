@@ -105,49 +105,131 @@ async def do_archive(
 
 @app.get("/view/{archive_id}", response_class=HTMLResponse)
 async def view_archive(archive_id: str):
-    """Serve archive HTML — ابتدا از Supabase، بعد local."""
+    """
+    نمایش آرشیو — مثل archive.is:
+    screenshot بزرگ + متن + اطلاعات
+    """
     import httpx as _httpx
 
-    # ── ۱. Supabase (اصلی) ───────────────────────────────────────────────
+    row = None
+    html_content = ""
+
+    # ── ۱. اطلاعات از Supabase ───────────────────────────────────────────
     sb = get_supabase()
     if sb:
         try:
             rows = await sb.select("archives", {"id": archive_id})
             if rows:
-                html_url = rows[0].get("html_url", "")
-                logger.info("View archive %s → html_url: %s", archive_id, html_url)
-                if html_url:
-                    async with _httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                        res = await client.get(html_url)
-                        if res.status_code == 200:
-                            return HTMLResponse(res.text)
-                        logger.warning("html_url fetch failed: %s", res.status_code)
+                row = rows[0]
         except Exception as exc:
-            logger.warning("Supabase view failed: %s", exc)
+            logger.warning("Supabase select failed: %s", exc)
 
-    # ── ۲. Local fallback ────────────────────────────────────────────────
-    data_dir = Path(settings.base_storage_dir)
-    if data_dir.exists():
-        for folder in data_dir.iterdir():
-            manifest_path = folder / "manifest.json"
-            if manifest_path.exists():
-                try:
-                    m = json.loads(manifest_path.read_text())
-                    if m.get("archive_id") == archive_id:
-                        html_path = folder / "archive.html"
-                        if html_path.exists():
-                            return HTMLResponse(html_path.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
+    # ── ۲. محتوای HTML از Supabase Storage ──────────────────────────────
+    if row and row.get("html_url"):
+        try:
+            async with _httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                res = await client.get(row["html_url"])
+                if res.status_code == 200:
+                    html_content = res.text
+        except Exception as exc:
+            logger.warning("html fetch failed: %s", exc)
 
-    return HTMLResponse(
-        f"""<html><head><meta charset="UTF-8"/></head><body style="font-family:sans-serif;padding:40px;text-align:center;">
-        <h2>⚠️ آرشیو یافت نشد</h2>
-        <p>آرشیو با شناسه <code>{archive_id}</code> در دسترس نیست.</p>
-        <p><a href="/">برگشت به صفحه اصلی</a></p>
-        </body></html>""",
-        status_code=404,
-    )
+    # ── ۳. Local fallback ────────────────────────────────────────────────
+    if not html_content:
+        data_dir = Path(settings.base_storage_dir)
+        if data_dir.exists():
+            for folder in data_dir.iterdir():
+                manifest_path = folder / "manifest.json"
+                if manifest_path.exists():
+                    try:
+                        m = json.loads(manifest_path.read_text())
+                        if m.get("archive_id") == archive_id:
+                            html_path = folder / "archive.html"
+                            if html_path.exists():
+                                html_content = html_path.read_text(encoding="utf-8")
+                                if not row:
+                                    row = {"url": m.get("url",""), "created_at": ""}
+                    except Exception:
+                        pass
+
+    if not html_content and not row:
+        return HTMLResponse(
+            f"""<html><head><meta charset="UTF-8"/></head>
+            <body style="font-family:sans-serif;padding:40px;text-align:center;">
+            <h2>⚠️ آرشیو یافت نشد</h2>
+            <p><a href="/">برگشت</a></p></body></html>""",
+            status_code=404,
+        )
+
+    # ── ۴. صفحه نمایش archive.is-style ──────────────────────────────────
+    orig_url = row.get("url", "") if row else ""
+    screenshot_url = row.get("screenshot_url", "") if row else ""
+    created_at = (row.get("created_at", "") or "")[:19].replace("T", " ") if row else ""
+
+    # استخراج متن از html_content
+    import re as _re
+    text_content = ""
+    if html_content:
+        # پیدا کردن div.content یا body
+        m = _re.search(r'<div class="content">(.*?)</div>', html_content, _re.DOTALL)
+        if m:
+            text_content = _re.sub(r'<[^>]+>', '', m.group(1)).strip()
+
+    screenshot_section = ""
+    if screenshot_url:
+        screenshot_section = f'''
+        <div class="ss-wrap">
+          <img src="{screenshot_url}" alt="screenshot" class="ss-img"/>
+        </div>'''
+
+    page = f"""<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>آرشیو — {orig_url[:60]}</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;}}
+body{{font-family:Tahoma,Arial,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;}}
+.topbar{{background:#1e3a8a;padding:10px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;}}
+.topbar .logo{{font-weight:bold;font-size:16px;color:#fff;}}
+.topbar .orig-url{{font-size:12px;color:#93c5fd;word-break:break-all;}}
+.topbar .date{{font-size:11px;color:#bfdbfe;margin-right:auto;white-space:nowrap;}}
+.container{{max-width:900px;margin:24px auto;padding:0 16px;}}
+.meta-card{{background:#1e293b;border-radius:12px;padding:16px 20px;margin-bottom:20px;
+            display:flex;gap:16px;flex-wrap:wrap;align-items:center;}}
+.meta-card a{{color:#60a5fa;text-decoration:none;font-size:13px;word-break:break-all;}}
+.meta-card .badge{{background:#1d4ed8;color:#fff;border-radius:6px;padding:3px 10px;font-size:11px;}}
+.ss-wrap{{background:#1e293b;border-radius:12px;overflow:hidden;margin-bottom:20px;
+          border:1px solid #334155;}}
+.ss-img{{width:100%;display:block;}}
+.content-card{{background:#1e293b;border-radius:12px;padding:20px;border:1px solid #334155;}}
+.content-card .label{{font-size:11px;color:#64748b;margin-bottom:8px;text-transform:uppercase;}}
+.content-card .text{{font-size:16px;line-height:1.8;white-space:pre-wrap;word-break:break-word;color:#e2e8f0;}}
+.no-ss{{background:#0f172a;border:2px dashed #334155;border-radius:12px;padding:40px;
+        text-align:center;color:#475569;margin-bottom:20px;font-size:14px;}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="logo">📦 Archive Hub</span>
+  <a class="orig-url" href="{orig_url}" target="_blank">{orig_url}</a>
+  <span class="date">🕐 {created_at}</span>
+</div>
+<div class="container">
+  <div class="meta-card">
+    <span class="badge">آرشیو شده</span>
+    <a href="{orig_url}" target="_blank">مشاهده لینک اصلی ↗</a>
+  </div>
+
+  {screenshot_section if screenshot_section else '<div class="no-ss">📸 اسکرین‌شات در دسترس نیست</div>'}
+
+  {f'<div class="content-card"><div class="label">متن پست</div><div class="text">{text_content}</div></div>' if text_content else ""}
+</div>
+</body>
+</html>"""
+
+    return HTMLResponse(page)
 
 
 @app.get("/screenshot/{archive_id}")
