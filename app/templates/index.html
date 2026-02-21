@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Archive Hub</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>🗄 Archive Hub</h1>
+      <p>لینک پست را بده تا آرشیو کامل (HTML + Screenshot) ذخیره شود.</p>
+
+      <form method="post" action="/archive" class="card">
+        <label>
+          🔗 لینک
+          <input type="url" name="url" required placeholder="https://x.com/..." />
+        </label>
+        <fieldset>
+          <legend>مقصد ذخیره</legend>
+          <label><input type="checkbox" name="save_local" checked /> 💾 Local</label>
+          <label><input type="checkbox" name="save_telegram" /> 📨 Telegram</label>
+        </fieldset>
+        <button type="submit">📦 آرشیو کن</button>
+      </form>
+
+      {% if error %}
+      <section class="error">{{ error }}</section>
+      {% endif %}
+
+      {% if result %}
+      <section class="result">
+        <h2>✅ آرشیو شد</h2>
+        {% if result.archive_link %}
+        <p>🌐 <strong>لینک آرشیو:</strong>
+          <a href="{{ result.archive_link }}" target="_blank">{{ result.archive_link }}</a>
+        </p>
+        {% endif %}
+        <details>
+          <summary>جزئیات</summary>
+          <pre>{{ result | tojson(indent=2) }}</pre>
+        </details>
+      </section>
+      {% endif %}
+    </main>
+  </body>
+</html>
