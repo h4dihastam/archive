@@ -1,8 +1,8 @@
 """
 Archiver:
-1. برای X.com: از Wayback Machine CDX API استفاده می‌کنه
-2. اگه نبود: به save.org می‌فرسته تا آرشیو کنه
-3. برای بقیه سایت‌ها: مستقیم fetch
+- Screenshot از thum.io (رایگان، بدون key)
+- برای X.com: microlink.io برای metadata + محتوا
+- برای بقیه: httpx مستقیم
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlparse, quote_plus
+from urllib.parse import urlparse, quote
 
 import httpx
 
@@ -43,103 +43,81 @@ def _is_twitter(url: str) -> bool:
     return any(x in host for x in ["x.com", "twitter.com"])
 
 
-def _make_archive_html(url: str, content: str, source: str = "") -> str:
-    source_note = f"<small>منبع داده: {source}</small>" if source else ""
+async def _get_screenshot_bytes(url: str, client: httpx.AsyncClient) -> bytes:
+    """
+    screenshot از thum.io — رایگان، بدون key، ۱۰۰۰/ماه
+    """
+    encoded = quote(url, safe="")
+    thumb_url = f"https://image.thum.io/get/width/1200/crop/900/noanimate/{encoded}"
+    try:
+        r = await client.get(thumb_url, timeout=30)
+        if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
+            logger.info("Screenshot from thum.io: %d bytes", len(r.content))
+            return r.content
+    except Exception as e:
+        logger.warning("thum.io failed: %s", e)
+    return b""
+
+
+async def _get_microlink(url: str, client: httpx.AsyncClient) -> dict:
+    """
+    microlink.io — metadata + محتوای صفحه، رایگان
+    """
+    try:
+        api_url = f"https://api.microlink.io/?url={quote(url, safe='')}&screenshot=false&meta=true"
+        r = await client.get(api_url, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("status") == "success":
+                return data.get("data", {})
+    except Exception as e:
+        logger.warning("microlink failed: %s", e)
+    return {}
+
+
+def _make_archive_html(url: str, content: str, title: str = "", author: str = "", date: str = "") -> str:
+    meta = ""
+    if author:
+        meta += f'<div class="meta-item">👤 {author}</div>'
+    if date:
+        meta += f'<div class="meta-item">📅 {date}</div>'
+
     return f"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Archive — {url}</title>
+<title>{title or 'Archive'} — Archive Hub</title>
 <style>
-body{{font-family:Tahoma,sans-serif;background:#f0f4f8;margin:0;padding:0;}}
-.banner{{background:#1d4ed8;color:#fff;padding:10px 16px;font-size:13px;}}
-.banner a{{color:#93c5fd;}}
-.content{{max-width:800px;margin:16px auto;background:#fff;border-radius:12px;
-          padding:20px;box-shadow:0 2px 12px rgba(0,0,0,.08);}}
+*{{box-sizing:border-box;}}
+body{{font-family:Tahoma,Arial,sans-serif;background:#f0f4f8;margin:0;padding:0;color:#1a1a1a;}}
+.banner{{background:#1d4ed8;color:#fff;padding:10px 20px;font-size:13px;display:flex;align-items:center;gap:8px;}}
+.banner a{{color:#93c5fd;text-decoration:none;}}
+.container{{max-width:680px;margin:20px auto;padding:0 16px;}}
+.card{{background:#fff;border-radius:16px;padding:24px;box-shadow:0 2px 16px rgba(0,0,0,.08);}}
+.title{{font-size:20px;font-weight:bold;margin-bottom:12px;line-height:1.4;}}
+.meta{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px;}}
+.meta-item{{font-size:13px;color:#555;}}
+.content{{font-size:16px;line-height:1.7;white-space:pre-wrap;word-break:break-word;}}
+.source{{margin-top:20px;padding-top:16px;border-top:1px solid #eee;font-size:12px;color:#888;}}
+.source a{{color:#3b82f6;}}
 </style>
 </head>
 <body>
 <div class="banner">
-  📦 Archive Hub — <a href="{url}">{url}</a> {source_note}
+  📦 <span>Archive Hub</span>
+  <a href="{url}" target="_blank">{url}</a>
 </div>
-<div class="content">{content}</div>
+<div class="container">
+  <div class="card">
+    {f'<div class="title">{title}</div>' if title else ''}
+    {f'<div class="meta">{meta}</div>' if meta else ''}
+    <div class="content">{content}</div>
+    <div class="source">منبع: <a href="{url}" target="_blank">{url}</a></div>
+  </div>
+</div>
 </body>
 </html>"""
-
-
-async def _try_wayback(url: str, client: httpx.AsyncClient) -> str | None:
-    """آخرین snapshot از Wayback Machine CDX API بگیر"""
-    try:
-        cdx = (
-            f"https://web.archive.org/cdx/search/cdx"
-            f"?url={quote_plus(url)}&output=json&limit=1&fl=timestamp&filter=statuscode:200"
-            f"&from=20200101&to=20991231"
-        )
-        r = await client.get(cdx, timeout=15)
-        data = r.json()
-        if len(data) < 2:
-            return None
-        ts = data[1][0]
-        wayback_url = f"https://web.archive.org/web/{ts}/{url}"
-        logger.info("Found wayback snapshot: %s", wayback_url)
-        r2 = await client.get(wayback_url, timeout=20)
-        if r2.status_code == 200:
-            return r2.text
-    except Exception as e:
-        logger.warning("Wayback failed: %s", e)
-    return None
-
-
-async def _try_save_to_wayback(url: str, client: httpx.AsyncClient) -> str | None:
-    """URL رو به Wayback Machine بفرست تا save کنه، لینک برگردون"""
-    try:
-        save_url = f"https://web.archive.org/save/{url}"
-        r = await client.get(save_url, timeout=30)
-        # Wayback Machine بعد از save به /web/timestamp/url redirect می‌کنه
-        if r.url and "web.archive.org/web/" in str(r.url):
-            return str(r.url)
-        # یا از header Content-Location بگیر
-        loc = r.headers.get("Content-Location", "")
-        if loc:
-            return f"https://web.archive.org{loc}"
-    except Exception as e:
-        logger.warning("Save to Wayback failed: %s", e)
-    return None
-
-
-async def _parse_tweet_from_wayback(html: str, original_url: str) -> str:
-    """محتوای توییت رو از HTML Wayback Machine استخراج کن"""
-    # پیدا کردن متن اصلی توییت
-    patterns = [
-        r'<div[^>]*data-testid="tweetText"[^>]*>(.*?)</div>',
-        r'<p[^>]*class="[^"]*TweetText[^"]*"[^>]*>(.*?)</p>',
-        r'"full_text"\s*:\s*"([^"]{10,})"',
-    ]
-    
-    tweet_text = ""
-    for pat in patterns:
-        m = re.search(pat, html, re.DOTALL)
-        if m:
-            tweet_text = re.sub(r'<[^>]+>', ' ', m.group(1)).strip()
-            tweet_text = re.sub(r'\s+', ' ', tweet_text)
-            break
-
-    # username
-    user_m = re.search(r'"screen_name"\s*:\s*"([^"]+)"', html)
-    username = f"@{user_m.group(1)}" if user_m else ""
-
-    if tweet_text:
-        return f"""
-        <div style="border:1px solid #e5e7eb;border-radius:12px;padding:16px;max-width:550px;margin:0 auto;">
-          <div style="font-weight:bold;margin-bottom:8px;">{username}</div>
-          <div style="font-size:18px;line-height:1.6;">{tweet_text}</div>
-          <div style="margin-top:12px;font-size:12px;color:#888;">
-            <a href="{original_url}">{original_url}</a>
-          </div>
-        </div>"""
-    else:
-        return f'<p>محتوا استخراج نشد. <a href="{original_url}">لینک اصلی</a></p>'
 
 
 class Archiver:
@@ -151,9 +129,6 @@ class Archiver:
         raw_html_path = folder / "raw.html"
         rendered_html_path = folder / "archive.html"
         screenshot_path = folder / "screenshot.png"
-        screenshot_path.write_bytes(b"")
-
-        wayback_link = ""  # لینک Wayback Machine برای نمایش
 
         async with httpx.AsyncClient(
             timeout=settings.request_timeout,
@@ -161,53 +136,65 @@ class Archiver:
             headers=STEALTH_HEADERS,
         ) as client:
 
+            # ── Screenshot از thum.io (برای همه سایت‌ها) ─────────────────────
+            screenshot_bytes = await _get_screenshot_bytes(url, client)
+            screenshot_path.write_bytes(screenshot_bytes)
+
             if _is_twitter(url):
-                # ── استراتژی برای X.com ───────────────────────────────────
+                # ── X.com: از microlink محتوا بگیر ──────────────────────────
+                meta = await _get_microlink(url, client)
 
-                # ۱. ابتدا از Wayback بگیر
-                raw_html = await _try_wayback(url, client)
+                title = meta.get("title", "")
+                description = meta.get("description", "")
+                author = meta.get("author", "")
+                publisher = meta.get("publisher", "")
+                date = meta.get("date", "")
 
-                if raw_html:
-                    raw_html_path.write_text(raw_html, encoding="utf-8")
-                    content = await _parse_tweet_from_wayback(raw_html, url)
-                    archive_html = _make_archive_html(url, content, "Wayback Machine")
-                    rendered_html_path.write_text(archive_html, encoding="utf-8")
-                else:
-                    # ۲. بفرست Wayback تا save کنه
-                    logger.info("No wayback snapshot, saving now...")
-                    wayback_link = await _try_save_to_wayback(url, client)
-                    
-                    if wayback_link:
-                        # بعد از save دوباره fetch کن
-                        try:
-                            r = await client.get(wayback_link, timeout=20)
-                            raw_html = r.text
-                            raw_html_path.write_text(raw_html, encoding="utf-8")
-                            content = await _parse_tweet_from_wayback(raw_html, url)
-                        except Exception:
-                            content = f'<p>آرشیو در Wayback Machine ذخیره شد.</p><p><a href="{wayback_link}">مشاهده در Wayback Machine</a></p>'
-                    else:
-                        content = f"""
-                        <div style="padding:20px;text-align:center;">
-                          <p>⚠️ محتوای پست در دسترس نبود.</p>
-                          <p>لینک اصلی: <a href="{url}">{url}</a></p>
-                          <p><a href="https://web.archive.org/web/*/{url}">جستجو در Wayback Machine</a></p>
-                        </div>"""
-                        raw_html_path.write_text("<!-- not available -->", encoding="utf-8")
+                # محتوای اصلی
+                content = description or title or f"<p>محتوا استخراج نشد.</p>"
+                
+                # حذف HTML tags از description
+                content = re.sub(r'<[^>]+>', '', content)
 
-                    archive_html = _make_archive_html(url, content, wayback_link or "")
-                    rendered_html_path.write_text(archive_html, encoding="utf-8")
+                # ساخت raw.html
+                raw_data = f"URL: {url}\nTitle: {title}\nAuthor: {author}\nDate: {date}\nContent: {description}"
+                raw_html_path.write_text(raw_data, encoding="utf-8")
+
+                archive_html = _make_archive_html(
+                    url=url,
+                    content=content,
+                    title=title,
+                    author=f"{author} ({publisher})" if publisher and publisher != author else author,
+                    date=date,
+                )
+                rendered_html_path.write_text(archive_html, encoding="utf-8")
 
             else:
-                # ── سایر سایت‌ها ─────────────────────────────────────────
+                # ── سایر سایت‌ها: مستقیم fetch ──────────────────────────────
                 try:
                     r = await client.get(url)
                     r.raise_for_status()
                     raw_html_path.write_text(r.text, encoding="utf-8")
-                    rendered_html_path.write_text(
-                        _make_archive_html(url, r.text),
-                        encoding="utf-8",
-                    )
+
+                    # microlink برای metadata
+                    meta = await _get_microlink(url, client)
+                    title = meta.get("title", "")
+                    description = meta.get("description", "")
+                    author = meta.get("author", "")
+                    date = meta.get("date", "")
+
+                    if description:
+                        content = re.sub(r'<[^>]+>', '', description)
+                        archive_html = _make_archive_html(url, content, title, author, date)
+                    else:
+                        archive_html = (
+                            f'<html><head><meta charset="UTF-8"/></head><body>'
+                            f'<div style="background:#1d4ed8;color:#fff;padding:10px;">'
+                            f'📦 <a href="{url}" style="color:#93c5fd">{url}</a></div>'
+                            f'{r.text}</body></html>'
+                        )
+                    rendered_html_path.write_text(archive_html, encoding="utf-8")
+
                 except Exception as e:
                     logger.error("Fetch failed: %s", e)
                     raw_html_path.write_text(f"<!-- fetch failed: {e} -->", encoding="utf-8")
