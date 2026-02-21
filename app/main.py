@@ -105,38 +105,49 @@ async def do_archive(
 
 @app.get("/view/{archive_id}", response_class=HTMLResponse)
 async def view_archive(archive_id: str):
-    """Serve self-contained archive HTML (Wayback-style)."""
-    # Try local first
-    data_dir = Path(settings.base_storage_dir)
-    for folder in data_dir.iterdir():
-        manifest_path = folder / "manifest.json"
-        if manifest_path.exists():
-            try:
-                m = json.loads(manifest_path.read_text())
-                if m.get("archive_id") == archive_id:
-                    html_path = folder / "archive.html"
-                    if html_path.exists():
-                        return HTMLResponse(html_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+    """Serve archive HTML — ابتدا از Supabase، بعد local."""
+    import httpx as _httpx
 
-    # Try Supabase
+    # ── ۱. Supabase (اصلی) ───────────────────────────────────────────────
     sb = get_supabase()
     if sb:
         try:
             rows = await sb.select("archives", {"id": archive_id})
             if rows:
                 html_url = rows[0].get("html_url", "")
+                logger.info("View archive %s → html_url: %s", archive_id, html_url)
                 if html_url:
-                    import httpx
-                    async with httpx.AsyncClient(timeout=30) as client:
+                    async with _httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
                         res = await client.get(html_url)
                         if res.status_code == 200:
                             return HTMLResponse(res.text)
+                        logger.warning("html_url fetch failed: %s", res.status_code)
         except Exception as exc:
             logger.warning("Supabase view failed: %s", exc)
 
-    return HTMLResponse("<h1>آرشیو یافت نشد</h1>", status_code=404)
+    # ── ۲. Local fallback ────────────────────────────────────────────────
+    data_dir = Path(settings.base_storage_dir)
+    if data_dir.exists():
+        for folder in data_dir.iterdir():
+            manifest_path = folder / "manifest.json"
+            if manifest_path.exists():
+                try:
+                    m = json.loads(manifest_path.read_text())
+                    if m.get("archive_id") == archive_id:
+                        html_path = folder / "archive.html"
+                        if html_path.exists():
+                            return HTMLResponse(html_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+    return HTMLResponse(
+        f"""<html><head><meta charset="UTF-8"/></head><body style="font-family:sans-serif;padding:40px;text-align:center;">
+        <h2>⚠️ آرشیو یافت نشد</h2>
+        <p>آرشیو با شناسه <code>{archive_id}</code> در دسترس نیست.</p>
+        <p><a href="/">برگشت به صفحه اصلی</a></p>
+        </body></html>""",
+        status_code=404,
+    )
 
 
 @app.get("/screenshot/{archive_id}")
