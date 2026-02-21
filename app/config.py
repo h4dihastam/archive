@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # Full URL of deployed app for webhook registration
     webhook_url: str = ""
 
-    bot_password: str = "changeme"
+    bot_password: str = ""  # خالی = بدون رمز
     admin_user_id: int = 6268682882
 
     # screenshotmachine.com API key (رایگان از screenshotmachine.com)
