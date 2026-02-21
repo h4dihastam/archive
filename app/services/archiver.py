@@ -45,17 +45,33 @@ def _is_twitter(url: str) -> bool:
 
 async def _get_screenshot_bytes(url: str, client: httpx.AsyncClient) -> bytes:
     """
-    screenshot از thum.io — رایگان، بدون key، ۱۰۰۰/ماه
+    screenshot از screenshotmachine.com
+    بعد thum.io به عنوان fallback
     """
     encoded = quote(url, safe="")
-    thumb_url = f"https://image.thum.io/get/width/1200/crop/900/noanimate/{encoded}"
+    
+    # ۱. screenshotmachine با key رایگان
+    sm_key = settings.screenshot_machine_key
+    if sm_key:
+        try:
+            sm_url = f"https://api.screenshotmachine.com/?key={sm_key}&url={encoded}&dimension=1280x900&format=png&delay=3000"
+            r = await client.get(sm_url, timeout=40)
+            if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
+                logger.info("Screenshot from screenshotmachine: %d bytes", len(r.content))
+                return r.content
+        except Exception as e:
+            logger.warning("screenshotmachine failed: %s", e)
+
+    # ۲. thum.io به عنوان fallback
     try:
+        thumb_url = f"https://image.thum.io/get/width/1280/crop/900/noanimate/{encoded}"
         r = await client.get(thumb_url, timeout=30)
         if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
             logger.info("Screenshot from thum.io: %d bytes", len(r.content))
             return r.content
     except Exception as e:
         logger.warning("thum.io failed: %s", e)
+    
     return b""
 
 

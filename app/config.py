@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     bot_password: str = "changeme"
     admin_user_id: int = 6268682882
 
+    # screenshotmachine.com API key (رایگان از screenshotmachine.com)
+    screenshot_machine_key: str = "dd29ad"  # key پیش‌فرض رایگان
+
     # Supabase
     supabase_url: str = ""
     supabase_key: str = ""        # anon/service_role key
