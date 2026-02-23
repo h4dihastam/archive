@@ -448,14 +448,16 @@ async def handle_update(update: dict) -> None:
                 headers = {"apikey": sb.key, "Authorization": "Bearer " + sb.key}
 
                 r1 = await c.get(sb.base + "/rest/v1/archives",
-                                 headers={**headers, "Prefer": "count=exact",
-                                          "Range-Unit": "items", "Range": "0-0"})
-                total_archives = r1.headers.get("content-range", "?/?").split("/")[-1]
+                                 headers={**headers, "Prefer": "count=exact"},
+                                 params={"select": "id", "limit": "1"})
+                cr1 = r1.headers.get("content-range", "0/0")
+                total_archives = cr1.split("/")[-1] if "/" in cr1 else str(len(r1.json()) if r1.is_success else 0)
 
                 r2 = await c.get(sb.base + "/rest/v1/bot_users",
-                                 headers={**headers, "Prefer": "count=exact",
-                                          "Range-Unit": "items", "Range": "0-0"})
-                total_users = r2.headers.get("content-range", "?/?").split("/")[-1]
+                                 headers={**headers, "Prefer": "count=exact"},
+                                 params={"select": "user_id", "limit": "1"})
+                cr2 = r2.headers.get("content-range", "0/0")
+                total_users = cr2.split("/")[-1] if "/" in cr2 else str(len(r2.json()) if r2.is_success else 0)
 
             lines = [
                 "آمار دیتابیس",
