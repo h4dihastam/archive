@@ -109,9 +109,14 @@ async def view_archive(archive_id: str):
     row = None
     if sb:
         try:
-            rows = await sb.select("archives", {"id": archive_id})
-            if rows:
-                row = rows[0]
+            async with httpx.AsyncClient(timeout=15) as _c:
+                _h = {"apikey": sb.key, "Authorization": "Bearer " + sb.key}
+                _r = await _c.get(sb.base + "/rest/v1/archives",
+                                  headers=_h,
+                                  params={"id": "eq." + archive_id})
+                rows = _r.json() if _r.is_success else []
+                if rows:
+                    row = rows[0]
         except Exception as exc:
             logger.warning("Supabase select failed: %s", exc)
 
@@ -187,19 +192,26 @@ body{font-family:'Vazirmatn',sans-serif;background:#060910;color:#e2e8f0;min-hei
 
 @app.get("/web/{archive_id}", response_class=HTMLResponse)
 async def view_web_archive(archive_id: str):
-    """نمایش HTML کامل آرشیو شده"""
+    """نمایش HTML کامل آرشیو شده — مستقیم از Supabase Storage"""
     sb = get_supabase()
-    if sb:
-        try:
-            rows = await sb.select("archives", {"id": archive_id})
+    if not sb:
+        return HTMLResponse("<h2>سرور در دسترس نیست</h2>", status_code=503)
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            headers = {"apikey": sb.key, "Authorization": "Bearer " + sb.key}
+            r = await c.get(sb.base + "/rest/v1/archives",
+                            headers=headers,
+                            params={"id": "eq." + archive_id, "select": "html_url"})
+            rows = r.json() if r.is_success else []
             if rows and rows[0].get("html_url"):
-                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
-                    r = await c.get(rows[0]["html_url"])
-                    if r.status_code == 200:
-                        return HTMLResponse(r.text)
-        except Exception as exc:
-            logger.warning("web archive fetch failed: %s", exc)
-    return HTMLResponse("<h2>آرشیو یافت نشد</h2>", status_code=404)
+                html_url = rows[0]["html_url"]
+                r2 = await c.get(html_url, follow_redirects=True)
+                if r2.status_code == 200:
+                    return HTMLResponse(r2.text)
+        return HTMLResponse("<h2>فایل آرشیو یافت نشد</h2>", status_code=404)
+    except Exception as exc:
+        logger.warning("web archive failed: %s", exc)
+        return HTMLResponse("<h2>خطا: " + str(exc) + "</h2>", status_code=500)
 
 
 @app.get("/screenshot/{archive_id}")

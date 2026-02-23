@@ -1,5 +1,5 @@
 """
-Archiver — آرشیو کامل صفحه با Playwright (Docker روی Render)
+Archiver — screenshot از screenshotmachine + محتوا از microlink
 """
 from __future__ import annotations
 
@@ -25,19 +25,95 @@ def _safe_slug(url: str) -> str:
     return (host + "_" + path + "_" + ts)[:100]
 
 
-async def _screenshot_fallback(url: str) -> bytes:
-    """اگه Playwright fail شد، از screenshotmachine بگیر"""
+def _is_twitter(url: str) -> bool:
+    return "x.com" in url.lower() or "twitter.com" in url.lower()
+
+
+async def _get_screenshot(url: str, client: httpx.AsyncClient) -> bytes:
+    """screenshot از screenshotmachine — قبلاً کار می‌کرد"""
+    key = settings.screenshot_machine_key or "dd29ad"
+    encoded = quote(url, safe="")
+    sm_url = (
+        "https://api.screenshotmachine.com/"
+        "?key=" + key +
+        "&url=" + encoded +
+        "&dimension=1280x900&format=png&delay=4000"
+    )
     try:
-        key = settings.screenshot_machine_key
-        encoded = quote(url, safe="")
-        sm_url = "https://api.screenshotmachine.com/?key=" + key + "&url=" + encoded + "&dimension=1280x900&format=png&delay=4000"
-        async with httpx.AsyncClient(timeout=40) as c:
-            r = await c.get(sm_url)
-            if r.status_code == 200 and r.headers.get("content-type","").startswith("image"):
-                return r.content
+        r = await client.get(sm_url, timeout=45)
+        ct = r.headers.get("content-type", "")
+        if r.status_code == 200 and ct.startswith("image") and len(r.content) > 5000:
+            logger.info("screenshot ok: %d bytes", len(r.content))
+            return r.content
+        logger.warning("screenshotmachine bad response: %s %d bytes", ct, len(r.content))
     except Exception as e:
-        logger.warning("screenshot fallback failed: %s", e)
+        logger.warning("screenshotmachine failed: %s", e)
+
+    # fallback: thum.io
+    try:
+        thumb = "https://image.thum.io/get/width/1280/crop/900/" + encoded
+        r2 = await client.get(thumb, timeout=30)
+        if r2.status_code == 200 and r2.headers.get("content-type","").startswith("image"):
+            return r2.content
+    except Exception as e:
+        logger.warning("thum.io failed: %s", e)
+
     return b""
+
+
+async def _get_microlink(url: str, client: httpx.AsyncClient) -> dict:
+    try:
+        r = await client.get(
+            "https://api.microlink.io/",
+            params={"url": url, "meta": "true", "video": "false"},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json().get("data", {})
+            return data
+    except Exception as e:
+        logger.warning("microlink failed: %s", e)
+    return {}
+
+
+def _make_archive_html(url: str, content: str, title: str, author: str, date: str) -> str:
+    now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    return """<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>""" + (title or url) + """</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:Tahoma,Arial,sans-serif;background:#f8fafc;direction:rtl;}
+.banner{background:#1e40af;color:#fff;padding:10px 20px;font-size:13px;
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+.banner a{color:#93c5fd;text-decoration:none;}
+.banner .ml{margin-right:auto;}
+.card{max-width:700px;margin:32px auto;background:#fff;border-radius:16px;
+  box-shadow:0 4px 24px rgba(0,0,0,.08);padding:32px;}
+.meta{color:#64748b;font-size:13px;margin-bottom:16px;display:flex;gap:16px;flex-wrap:wrap;}
+h2{font-size:1.3rem;margin-bottom:16px;color:#1e293b;}
+.body{font-size:1rem;line-height:1.9;color:#334155;white-space:pre-wrap;word-break:break-word;}
+</style>
+</head>
+<body>
+<div class="banner">
+  📦 <strong>Archive Hub</strong>
+  <span>""" + now_str + """</span>
+  <a href=\"""" + url + """\" target="_blank" class="ml">🔗 لینک اصلی</a>
+</div>
+<div class="card">
+  <div class="meta">
+    """ + ("<span>👤 " + author + "</span>" if author else "") + """
+    """ + ("<span>📅 " + date[:10] + "</span>" if date else "") + """
+  </div>
+  """ + ("<h2>" + title + "</h2>" if title else "") + """
+  <div class="body">""" + content + """</div>
+</div>
+</body>
+</html>"""
 
 
 class Archiver:
@@ -49,107 +125,80 @@ class Archiver:
         raw_html_path = folder / "raw.html"
         rendered_html_path = folder / "archive.html"
         screenshot_path = folder / "screenshot.png"
-        post_meta = {}
+        post_meta: dict = {}
 
-        try:
-            from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+        async with httpx.AsyncClient(
+            timeout=20,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 Chrome/122.0.0.0"},
+        ) as client:
 
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-setuid-sandbox",
-                          "--disable-dev-shm-usage", "--disable-gpu"]
+            # ── Screenshot ────────────────────────────────────────────────
+            ss = await _get_screenshot(url, client)
+            screenshot_path.write_bytes(ss)
+
+            # ── محتوا ─────────────────────────────────────────────────────
+            post_meta = {}
+
+            if _is_twitter(url):
+                meta = await _get_microlink(url, client)
+                title = meta.get("title", "")
+                description = meta.get("description", "")
+                author = meta.get("author", "")
+                publisher = meta.get("publisher", "")
+                date = meta.get("date", "")
+
+                # username از title: "Name (@user) on X"
+                username = ""
+                um = re.search(r'\(@([^)]+)\)', title)
+                if um:
+                    username = um.group(1)
+
+                post_meta = {
+                    "title": title,
+                    "author": author or publisher,
+                    "username": username,
+                    "date": date,
+                }
+
+                content_text = re.sub(r'<[^>]+>', '', description or title or "")
+                raw_data = "URL: " + url + "\nTitle: " + title + "\nAuthor: " + author + "\nDate: " + date + "\nContent: " + description
+                raw_html_path.write_text(raw_data, encoding="utf-8")
+
+                display_author = author
+                if publisher and publisher != author:
+                    display_author = author + " (" + publisher + ")"
+
+                archive_html = _make_archive_html(
+                    url=url,
+                    content=content_text,
+                    title=title,
+                    author=display_author,
+                    date=date,
                 )
-                context = await browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/122.0.0.0 Safari/537.36"
-                    ),
-                    viewport={"width": 1280, "height": 900},
-                    locale="en-US",
-                )
-                page = await context.new_page()
+                rendered_html_path.write_text(archive_html, encoding="utf-8")
 
+            else:
                 try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    await page.wait_for_timeout(5000)
-
-                    # اسکرول برای لود محتوای lazy
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
-                    await page.wait_for_timeout(2000)
-
-                    html = await page.content()
-                    title = await page.title() or url
-                    post_meta["title"] = title
-
-                    # username از title توییتر
-                    um = re.search(r'\(@([^)]+)\)', title)
-                    if um:
-                        post_meta["username"] = um.group(1)
-
-                    raw_html_path.write_text(html, encoding="utf-8")
-
-                    # بنر archive.is-style
-                    now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
-                    banner = (
-                        '<div style="position:fixed;top:0;left:0;right:0;z-index:2147483647;'
-                        'background:#1e40af;color:#fff;padding:10px 20px;font-family:system-ui,sans-serif;'
-                        'display:flex;align-items:center;gap:12px;box-shadow:0 2px 8px rgba(0,0,0,.4);font-size:13px;">'
-                        '📦 <strong>Archive Hub</strong>'
-                        '<span>' + now_str + '</span>'
-                        '<a href="' + url + '" target="_blank" style="color:#93c5fd;margin-left:auto;">🔗 لینک اصلی</a>'
-                        '</div>'
-                        '<script>document.documentElement.style.paddingTop="50px";</script>'
+                    r = await client.get(url)
+                    r.raise_for_status()
+                    raw_html_path.write_text(r.text, encoding="utf-8")
+                    meta = await _get_microlink(url, client)
+                    title = meta.get("title", "")
+                    description = meta.get("description", "")
+                    author = meta.get("author", "")
+                    date = meta.get("date", "")
+                    post_meta = {"title": title, "author": author, "date": date}
+                    content_text = re.sub(r'<[^>]+>', '', description or title or "")
+                    archive_html = _make_archive_html(
+                        url=url, content=content_text,
+                        title=title, author=author, date=date,
                     )
-                    archived = html.replace("</body>", banner + "</body>", 1) if "</body>" in html else html + banner
-                    rendered_html_path.write_text(archived, encoding="utf-8")
-
-                    # اسکرین‌شات
-                    await page.screenshot(path=str(screenshot_path), full_page=False)
-                    logger.info("Playwright archive done: %s", url)
-
-                except PWTimeout:
-                    logger.warning("Playwright timeout: %s", url)
-                    html = "<h2>Timeout</h2><p>" + url + "</p>"
-                    rendered_html_path.write_text(html, encoding="utf-8")
-                    raw_html_path.write_text(html, encoding="utf-8")
+                    rendered_html_path.write_text(archive_html, encoding="utf-8")
                 except Exception as e:
-                    logger.error("Playwright page error: %s", e)
-                    html = "<h2>Error</h2><p>" + url + "</p><p>" + str(e) + "</p>"
-                    rendered_html_path.write_text(html, encoding="utf-8")
-                    raw_html_path.write_text(html, encoding="utf-8")
-                finally:
-                    await browser.close()
-
-        except ImportError:
-            # Playwright نصب نیست — fallback به httpx + screenshotmachine
-            logger.warning("Playwright not available, using httpx fallback")
-            try:
-                async with httpx.AsyncClient(timeout=20, follow_redirects=True,
-                    headers={"User-Agent": "Mozilla/5.0 Chrome/122.0.0.0"}) as c:
-                    r = await c.get(url)
-                    html = r.text
-                    raw_html_path.write_text(html, encoding="utf-8")
-                    rendered_html_path.write_text(html, encoding="utf-8")
-            except Exception as e:
-                rendered_html_path.write_text("<p>Error: " + str(e) + "</p>", encoding="utf-8")
-                raw_html_path.write_text("", encoding="utf-8")
-
-            # screenshot از screenshotmachine
-            ss = await _screenshot_fallback(url)
-            screenshot_path.write_bytes(ss)
-
-        except Exception as e:
-            logger.error("Archiver error: %s", e)
-            rendered_html_path.write_text("<p>Error: " + str(e) + "</p>", encoding="utf-8")
-            raw_html_path.write_text("", encoding="utf-8")
-            screenshot_path.write_bytes(b"")
-
-        # اگه screenshot نگرفت، از fallback استفاده کن
-        if not screenshot_path.exists() or screenshot_path.stat().st_size < 1000:
-            ss = await _screenshot_fallback(url)
-            screenshot_path.write_bytes(ss)
+                    logger.error("fetch failed: %s", e)
+                    rendered_html_path.write_text("<p>Error: " + str(e) + "</p>", encoding="utf-8")
+                    raw_html_path.write_text("", encoding="utf-8")
 
         return ArchiveArtifact(
             url=url,
