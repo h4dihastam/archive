@@ -132,7 +132,7 @@ async def db_save_user(user_id: int, username: str, full_name: str):
 
 
 async def db_save_archive_user(archive_id: str, user_id: int, username: str):
-    """ربط archive به user"""
+    """آپدیت archive با اطلاعات کاربر"""
     sb = get_supabase()
     if not sb:
         return
@@ -140,14 +140,15 @@ async def db_save_archive_user(archive_id: str, user_id: int, username: str):
         async with httpx.AsyncClient(timeout=10) as c:
             headers = {
                 "apikey": sb.key,
-                "Authorization": f"Bearer {sb.key}",
+                "Authorization": "Bearer " + sb.key,
                 "Content-Type": "application/json",
             }
-            await c.post(
-                f"{sb.base}/rest/v1/archives",
+            # PATCH به جای POST — آپدیت ردیف موجود
+            await c.patch(
+                sb.base + "/rest/v1/archives",
                 headers=headers,
-                json={"id": archive_id, "saved_by_user_id": user_id, "saved_by_username": username},
-                params={"on_conflict": "id"},
+                params={"id": "eq." + archive_id},
+                json={"saved_by_user_id": user_id, "saved_by_username": username},
             )
     except Exception as e:
         logger.warning("db_save_archive_user: %s", e)
