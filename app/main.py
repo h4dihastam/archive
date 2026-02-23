@@ -277,3 +277,94 @@ async def set_webhook(request: Request):
             json={"url": endpoint},
         )
         return JSONResponse(res.json())
+
+
+# ── Admin Panel ───────────────────────────────────────────────────────────────
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_panel(request: Request):
+    return templates.TemplateResponse("admin.html", {
+        "request": request,
+        "admin_password": settings.bot_password or "admin",
+    })
+
+
+def _check_admin(request: Request) -> bool:
+    key = request.headers.get("X-Admin-Key", "")
+    return key == (settings.bot_password or "admin")
+
+
+@app.get("/admin/api/stats")
+async def admin_stats(request: Request):
+    if not _check_admin(request):
+        from fastapi import HTTPException
+        raise HTTPException(403)
+    sb = get_supabase()
+    if not sb:
+        return {"total_archives": 0, "total_users": 0, "file_count": 0, "total_bytes": 0}
+    async with httpx.AsyncClient(timeout=15) as c:
+        headers = {"apikey": sb.key, "Authorization": f"Bearer {sb.key}"}
+        r1 = await c.get(f"{sb.base}/rest/v1/archives",
+                         headers={**headers, "Prefer": "count=exact", "Range-Unit": "items", "Range": "0-0"})
+        total_archives = int((r1.headers.get("content-range","0/?").split("/")[-1]) or 0)
+        r2 = await c.get(f"{sb.base}/rest/v1/bot_users",
+                         headers={**headers, "Prefer": "count=exact", "Range-Unit": "items", "Range": "0-0"})
+        total_users = int((r2.headers.get("content-range","0/?").split("/")[-1]) or 0)
+        r3 = await c.post(f"{sb.base}/rest/v1/rpc/get_storage_stats",
+                          headers={**headers, "Content-Type": "application/json"}, json={})
+        file_count, total_bytes = 0, 0
+        if r3.is_success and r3.json():
+            row = r3.json()[0] if isinstance(r3.json(), list) else r3.json()
+            file_count = int(row.get("file_count", 0) or 0)
+            total_bytes = int(row.get("total_bytes", 0) or 0)
+    return {"total_archives": total_archives, "total_users": total_users,
+            "file_count": file_count, "total_bytes": total_bytes}
+
+
+@app.get("/admin/api/archives")
+async def admin_archives(request: Request):
+    if not _check_admin(request):
+        from fastapi import HTTPException
+        raise HTTPException(403)
+    sb = get_supabase()
+    if not sb:
+        return []
+    async with httpx.AsyncClient(timeout=15) as c:
+        headers = {"apikey": sb.key, "Authorization": f"Bearer {sb.key}"}
+        r = await c.get(f"{sb.base}/rest/v1/archives", headers=headers,
+                        params={"order": "created_at.desc", "limit": "100"})
+        return r.json() if r.is_success else []
+
+
+@app.get("/admin/api/users")
+async def admin_users(request: Request):
+    if not _check_admin(request):
+        from fastapi import HTTPException
+        raise HTTPException(403)
+    sb = get_supabase()
+    if not sb:
+        return []
+    async with httpx.AsyncClient(timeout=15) as c:
+        headers = {"apikey": sb.key, "Authorization": f"Bearer {sb.key}"}
+        r = await c.get(f"{sb.base}/rest/v1/bot_users", headers=headers,
+                        params={"order": "created_at.desc"})
+        return r.json() if r.is_success else []
+
+
+@app.delete("/admin/api/delete/{archive_id}")
+async def admin_delete(archive_id: str, request: Request):
+    if not _check_admin(request):
+        from fastapi import HTTPException
+        raise HTTPException(403)
+    from app.storage.supabase import get_supabase as _gsb
+    sb = _gsb()
+    if not sb:
+        return {"ok": False}
+    async with httpx.AsyncClient(timeout=15) as c:
+        headers = {"apikey": sb.key, "Authorization": f"Bearer {sb.key}"}
+        await c.delete(f"{sb.base}/rest/v1/archives", headers=headers,
+                       params={"id": f"eq.{archive_id}"})
+        for fname in ["archive.html", "raw.html", "screenshot.png"]:
+            await c.delete(f"{sb.base}/storage/v1/object/{sb.bucket}/{archive_id}/{fname}",
+                           headers=headers)
+    return {"ok": True}
