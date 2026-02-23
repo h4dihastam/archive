@@ -377,7 +377,9 @@ async def handle_update(update: dict) -> None:
             date = (r.get("created_at") or "")[:10]
             view = (base + "/view/" + (r.get("id") or "")) if base else ""
             post_info = (" | پست: @" + post_uname) if post_uname else ""
-            lines.append(str(i) + ". [" + aid + "] " + date + "\n💾 ذخیره: @" + saved_by + post_info + "\n🔗 " + url + "\n📎 " + view)
+            full_id = r.get("id", "")
+            short_id = r.get("short_id", full_id[:8])
+            lines.append(str(i) + ". " + date + "\n🆔 <code>" + short_id + "</code>" + "\n💾 @" + saved_by + post_info + "\n🔗 " + url + "\n📎 " + view)
         await msg(chat_id, "آخرین 20 آرشیو:\n\n" + "\n\n".join(lines), kbd=admin_kbd())
         return
 
@@ -430,9 +432,9 @@ async def handle_update(update: dict) -> None:
     if text == BTN_ADMIN_DELETE and is_admin(user_id):
         st["state"] = S_ADMIN_DELETE
         await msg(chat_id,
-                  "🗑 <b>حذف آرشیو</b>\n\n"
-                  "شناسه آرشیو (UUID) را بفرستید.\n"
-                  "از لیست آرشیوها می‌تونی کپی کنی.\n\n/cancel برای لغو")
+                  "حذف آرشیو\n\n"
+                  "شناسه کوتاه (8 کاراکتر) یا UUID کامل را بفرستید.\n"
+                  "از لیست آرشیوها کپی کنید.\n\n/cancel برای لغو")
         return
 
     if text == BTN_ADMIN_STATS and is_admin(user_id):
@@ -478,13 +480,29 @@ async def handle_update(update: dict) -> None:
         return
 
     if st["state"] == S_ADMIN_DELETE and is_admin(user_id):
-        archive_id = text.strip()
+        raw_id = text.strip()
         st["state"] = S_MENU
+        # اگه short_id بود، UUID کامل رو پیدا کن
+        archive_id = raw_id
+        if len(raw_id) == 8:
+            sb = get_supabase()
+            if sb:
+                try:
+                    async with httpx.AsyncClient(timeout=10) as c:
+                        headers = {"apikey": sb.key, "Authorization": "Bearer " + sb.key}
+                        r = await c.get(sb.base + "/rest/v1/archives",
+                                        headers=headers,
+                                        params={"short_id": "eq." + raw_id, "select": "id"})
+                        rows = r.json()
+                        if rows:
+                            archive_id = rows[0]["id"]
+                except Exception:
+                    pass
         ok = await db_delete_archive(archive_id)
         if ok:
-            await msg(chat_id, f"✅ آرشیو <code>{archive_id[:8]}...</code> حذف شد.", kbd=admin_kbd())
+            await msg(chat_id, "آرشیو " + raw_id + " حذف شد.", kbd=admin_kbd())
         else:
-            await msg(chat_id, f"❌ حذف ناموفق. شناسه رو چک کن.", kbd=admin_kbd())
+            await msg(chat_id, "حذف ناموفق. شناسه رو چک کن.", kbd=admin_kbd())
         return
 
     if st["state"] == S_URL:
