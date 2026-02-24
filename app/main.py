@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import json
 import logging
 from pathlib import Path
@@ -144,7 +145,8 @@ async def view_archive(archive_id: str):
     row = None
     if sb:
         try:
-            async with httpx.AsyncClient(timeout=15) as _c:
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=15) as _c:
                 _h = {"apikey": sb.key, "Authorization": "Bearer " + sb.key,
                       "Accept": "application/json"}
                 _r = await _c.get(
