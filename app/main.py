@@ -196,7 +196,10 @@ async def view_archive(archive_id: str):
     else:
         ss_section = '<div class="no-ss">📸 اسکرین‌شات موجود نیست</div>'
 
-    dl_btn = ('<a href="' + html_url + '" target="_blank" class="btn btn-dl">⬇️ دانلود HTML</a>') if html_url else ""
+    base = settings.archive_base or ""
+    web_link = (base + "/web/" + archive_id) if base else ""
+    dl_btn = ('<a href="' + html_url + '" download class="btn btn-dl">⬇️ دانلود HTML</a>') if html_url else ""
+    web_btn = ('<a href="' + web_link + '" target="_blank" class="btn btn-cyan">👁 مشاهده آرشیو وب</a>') if web_link else ""
     author_span = ('<span class="author">👤 ' + author + '</span>') if author else ""
     orig_short = orig_url[:70] + ("..." if len(orig_url) > 70 else "")
 
@@ -222,6 +225,7 @@ async def view_archive(archive_id: str):
         ".author{color:#a5b4fc;font-size:14px;}"
         ".btn{padding:9px 18px;border-radius:10px;font-size:13px;font-weight:600;text-decoration:none;display:inline-block;transition:.2s;}"
         ".btn-blue{background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.4);color:#a5b4fc;}"
+        ".btn-cyan{background:rgba(6,182,212,.15);border:1px solid rgba(6,182,212,.4);color:#67e8f9;}"
         ".btn-dl{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3);color:#86efac;}"
         ".ss-wrap{border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.08);background:#0f172a;}"
         ".ss-bar{background:#1e293b;padding:8px 12px;display:flex;gap:6px;align-items:center;}"
@@ -242,6 +246,7 @@ async def view_archive(archive_id: str):
         "<span class='badge'>✅ آرشیو شده</span>"
         + author_span +
         "<a href='" + orig_url + "' target='_blank' class='btn btn-blue'>🔗 لینک اصلی ↗</a>"
+        + web_btn +
         + dl_btn +
         "</div>"
         "</div>"
