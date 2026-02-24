@@ -181,59 +181,74 @@ async def view_archive(archive_id: str):
         author = "@" + row["post_username"]
 
     base = settings.archive_base or ""
-    web_link = (base + "/web/" + archive_id) if base else ""
+    ss_section = ""
+    if screenshot_url:
+        ss_section = (
+            '<div class="ss-wrap">'
+            '<div class="ss-bar">'
+            '<div class="dot" style="background:#ef4444"></div>'
+            '<div class="dot" style="background:#eab308"></div>'
+            '<div class="dot" style="background:#22c55e"></div>'
+            '</div>'
+            '<img src="' + screenshot_url + '" class="ss-img" alt="screenshot"/>'
+            '</div>'
+        )
+    else:
+        ss_section = '<div class="no-ss">📸 اسکرین‌شات موجود نیست</div>'
 
-    page = """<!DOCTYPE html>
-<html lang="fa" dir="rtl">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>آرشیو</title>
-<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700&display=swap" rel="stylesheet"/>
-<style>
-*{box-sizing:border-box;margin:0;padding:0;}
-body{font-family:'Vazirmatn',sans-serif;background:#060910;color:#e2e8f0;min-height:100vh;}
-.bar{background:#1e3a8a;padding:12px 20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
-.bar .logo{font-weight:700;color:#fff;font-size:15px;}
-.bar a{color:#93c5fd;font-size:12px;word-break:break-all;text-decoration:none;}
-.bar .date{font-size:11px;color:#bfdbfe;margin-right:auto;}
-.wrap{max-width:860px;margin:24px auto;padding:0 16px;display:flex;flex-direction:column;gap:16px;}
-.card{background:rgba(255,255,255,.05);border:1px solid rgba(99,102,241,.2);border-radius:16px;padding:20px;}
-.meta{display:flex;gap:12px;flex-wrap:wrap;align-items:center;}
-.badge{background:#1d4ed8;color:#fff;border-radius:6px;padding:4px 12px;font-size:12px;font-weight:600;}
-.btn{padding:10px 20px;border-radius:10px;font-size:13px;font-weight:600;text-decoration:none;display:inline-block;transition:.2s;}
-.btn-blue{background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.4);color:#a5b4fc;}
-.btn-blue:hover{background:rgba(99,102,241,.3);}
-.btn-cyan{background:rgba(6,182,212,.15);border:1px solid rgba(6,182,212,.4);color:#67e8f9;}
-.btn-cyan:hover{background:rgba(6,182,212,.3);}
-.ss-img{width:100%;border-radius:12px;display:block;}
-.no-ss{padding:40px;text-align:center;color:#475569;font-size:14px;}
-</style>
-</head>
-<body>
-<div class="bar">
-  <span class="logo">📦 Archive Hub</span>
-  <a href="""" + orig_url + """" target="_blank">""" + orig_url[:80] + """</a>
-  <span class="date">🕐 """ + created_at + """</span>
-</div>
-<div class="wrap">
-  <div class="card">
-    <div class="meta">
-      <span class="badge">✅ آرشیو شده</span>
-      """ + ('<span style="color:#a5b4fc;font-size:14px;">👤 ' + author + '</span>' if author else '') + """
-      <a href="""" + orig_url + """" target="_blank" class="btn btn-blue">🔗 لینک اصلی ↗</a>
-      """ + ('<a href="' + web_link + '" target="_blank" class="btn btn-cyan">🌐 مشاهده آرشیو وب</a>' if web_link else '') + """
-      """ + ('<a href="' + html_url + '" target="_blank" class="btn btn-blue">⬇️ دانلود HTML</a>' if html_url else '') + """
-    </div>
-  </div>
+    dl_btn = ('<a href="' + html_url + '" target="_blank" class="btn btn-dl">⬇️ دانلود HTML</a>') if html_url else ""
+    author_span = ('<span class="author">👤 ' + author + '</span>') if author else ""
+    orig_short = orig_url[:70] + ("..." if len(orig_url) > 70 else "")
 
-  <div class="card">
-    """ + ('<img src="' + screenshot_url + '" class="ss-img" alt="screenshot"/>' if screenshot_url else '<div class="no-ss">📸 اسکرین‌شات موجود نیست</div>') + """
-  </div>
-</div>
-</body>
-</html>"""
-
+    page = (
+        "<!DOCTYPE html>"
+        "<html lang='fa' dir='rtl'>"
+        "<head>"
+        "<meta charset='UTF-8'/>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
+        "<title>آرشیو — Archive Hub</title>"
+        "<link href='https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700&display=swap' rel='stylesheet'/>"
+        "<style>"
+        "*{box-sizing:border-box;margin:0;padding:0;}"
+        "body{font-family:'Vazirmatn',sans-serif;background:#060910;color:#e2e8f0;min-height:100vh;}"
+        ".bar{background:#1e3a8a;padding:12px 20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}"
+        ".bar .logo{font-weight:700;color:#fff;font-size:15px;white-space:nowrap;}"
+        ".bar a{color:#93c5fd;font-size:12px;word-break:break-all;text-decoration:none;}"
+        ".bar .date{font-size:11px;color:#bfdbfe;margin-right:auto;white-space:nowrap;}"
+        ".wrap{max-width:900px;margin:24px auto;padding:0 16px;display:flex;flex-direction:column;gap:16px;}"
+        ".card{background:rgba(255,255,255,.05);border:1px solid rgba(99,102,241,.2);border-radius:16px;padding:20px;}"
+        ".meta{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}"
+        ".badge{background:#1d4ed8;color:#fff;border-radius:6px;padding:4px 12px;font-size:12px;font-weight:600;}"
+        ".author{color:#a5b4fc;font-size:14px;}"
+        ".btn{padding:9px 18px;border-radius:10px;font-size:13px;font-weight:600;text-decoration:none;display:inline-block;transition:.2s;}"
+        ".btn-blue{background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.4);color:#a5b4fc;}"
+        ".btn-dl{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3);color:#86efac;}"
+        ".ss-wrap{border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.08);background:#0f172a;}"
+        ".ss-bar{background:#1e293b;padding:8px 12px;display:flex;gap:6px;align-items:center;}"
+        ".dot{width:10px;height:10px;border-radius:50%;}"
+        ".ss-img{width:100%;display:block;max-height:650px;object-fit:cover;object-position:top;}"
+        ".no-ss{padding:40px;text-align:center;color:#475569;font-size:14px;}"
+        "</style>"
+        "</head>"
+        "<body>"
+        "<div class='bar'>"
+        "<span class='logo'>📦 Archive Hub</span>"
+        "<a href='" + orig_url + "' target='_blank'>" + orig_short + "</a>"
+        "<span class='date'>🕐 " + created_at + "</span>"
+        "</div>"
+        "<div class='wrap'>"
+        "<div class='card'>"
+        "<div class='meta'>"
+        "<span class='badge'>✅ آرشیو شده</span>"
+        + author_span +
+        "<a href='" + orig_url + "' target='_blank' class='btn btn-blue'>🔗 لینک اصلی ↗</a>"
+        + dl_btn +
+        "</div>"
+        "</div>"
+        "<div class='card'>" + ss_section + "</div>"
+        "</div>"
+        "</body></html>"
+    )
     return HTMLResponse(page)
 
 
