@@ -246,7 +246,7 @@ async def view_archive(archive_id: str):
         "<span class='badge'>✅ آرشیو شده</span>"
         + author_span +
         "<a href='" + orig_url + "' target='_blank' class='btn btn-blue'>🔗 لینک اصلی ↗</a>"
-        + web_btn +
+        + web_btn
         + dl_btn +
         "</div>"
         "</div>"
