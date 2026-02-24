@@ -183,9 +183,12 @@ tr:hover td{background:rgba(255,255,255,.03);}
 <script>
 const ADMIN_PASSWORD = "{{ admin_password }}";
 
+let _adminKey = '';
+
 function login() {
   const pwd = document.getElementById('pwdInput').value;
   if (pwd === ADMIN_PASSWORD) {
+    _adminKey = pwd;
     document.getElementById('authScreen').style.display = 'none';
     document.getElementById('dashboard').style.display = 'grid';
     loadStats();
@@ -197,6 +200,7 @@ function login() {
 }
 
 function logout() {
+  _adminKey = '';
   document.getElementById('authScreen').style.display = 'flex';
   document.getElementById('dashboard').style.display = 'none';
   document.getElementById('pwdInput').value = '';
@@ -211,8 +215,9 @@ function showPage(name, btn) {
 
 async function apiFetch(path) {
   const r = await fetch('/admin/api' + path, {
-    headers: {'X-Admin-Key': document.getElementById('pwdInput').value || sessionStorage.getItem('adminPwd') || ''}
+    headers: {'X-Admin-Key': _adminKey}
   });
+  if (!r.ok) { console.error('API error', r.status, path); return []; }
   return r.json();
 }
 
@@ -269,7 +274,7 @@ async function deleteArchive(id, btn) {
   btn.textContent = '...';
   const r = await fetch('/admin/api/delete/' + id, {
     method: 'DELETE',
-    headers: {'X-Admin-Key': document.getElementById('pwdInput').value || ''}
+    headers: {'X-Admin-Key': _adminKey}
   });
   if (r.ok) {
     btn.closest('tr').style.opacity = '0.3';

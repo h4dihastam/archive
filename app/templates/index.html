@@ -1,47 +1,172 @@
 <!doctype html>
 <html lang="fa" dir="rtl">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Archive Hub</title>
-    <link rel="stylesheet" href="/static/style.css" />
-  </head>
-  <body>
-    <main class="container">
-      <h1>🗄 Archive Hub</h1>
-      <p>لینک پست را بده تا آرشیو کامل (HTML + Screenshot) ذخیره شود.</p>
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Archive Hub</title>
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: { sans: ['Vazirmatn', 'sans-serif'] },
+      animation: {
+        'fade-up': 'fadeUp 0.5s cubic-bezier(0.16,1,0.3,1) forwards',
+        'spin-slow': 'spin 3s linear infinite',
+      },
+      keyframes: {
+        fadeUp: {
+          '0%': { opacity: '0', transform: 'translateY(16px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
+        }
+      }
+    }
+  }
+}
+</script>
+<style>
+input[type=checkbox]{appearance:none;width:1.2rem;height:1.2rem;border:2px solid rgba(165,180,252,.4);border-radius:.35rem;background:rgba(30,41,59,.5);cursor:pointer;position:relative;transition:all .2s;}
+input[type=checkbox]:checked{background:#6366f1;border-color:#6366f1;}
+input[type=checkbox]:checked::after{content:'✓';position:absolute;color:#fff;font-size:.8rem;font-weight:700;top:50%;left:50%;transform:translate(-50%,-50%);}
+::-webkit-scrollbar{width:6px;}
+::-webkit-scrollbar-track{background:#0f172a;}
+::-webkit-scrollbar-thumb{background:rgba(99,102,241,.4);border-radius:3px;}
+</style>
+</head>
+<body class="bg-slate-950 text-slate-300 min-h-screen font-sans overflow-x-hidden">
 
-      <form method="post" action="/archive" class="card">
-        <label>
-          🔗 لینک
-          <input type="url" name="url" required placeholder="https://x.com/..." />
-        </label>
-        <fieldset>
-          <legend>مقصد ذخیره</legend>
-          <label><input type="checkbox" name="save_local" checked /> 💾 Local</label>
-          <label><input type="checkbox" name="save_telegram" /> 📨 Telegram</label>
-        </fieldset>
-        <button type="submit">📦 آرشیو کن</button>
-      </form>
+<!-- background glow -->
+<div class="fixed inset-0 z-0 pointer-events-none">
+  <div class="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[400px] bg-indigo-700/20 rounded-full blur-[120px]"></div>
+  <div class="absolute bottom-0 right-1/4 w-[400px] h-[300px] bg-purple-700/15 rounded-full blur-[100px]"></div>
+</div>
 
-      {% if error %}
-      <section class="error">{{ error }}</section>
-      {% endif %}
+<main class="relative z-10 max-w-2xl mx-auto px-5 py-14 flex flex-col gap-8">
 
-      {% if result %}
-      <section class="result">
-        <h2>✅ آرشیو شد</h2>
-        {% if result.archive_link %}
-        <p>🌐 <strong>لینک آرشیو:</strong>
-          <a href="{{ result.archive_link }}" target="_blank">{{ result.archive_link }}</a>
-        </p>
-        {% endif %}
-        <details>
-          <summary>جزئیات</summary>
-          <pre>{{ result | tojson(indent=2) }}</pre>
-        </details>
-      </section>
-      {% endif %}
-    </main>
-  </body>
+  <!-- header -->
+  <header class="text-center space-y-3 animate-fade-up">
+    <h1 class="text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-l from-cyan-300 via-indigo-300 to-purple-300 flex items-center justify-center gap-3">
+      🗄 Archive Hub
+    </h1>
+    <p class="text-slate-400 text-base">آرشیو کامل صفحات وب — screenshot + فایل HTML</p>
+  </header>
+
+  <!-- form card -->
+  <section class="bg-white/[0.04] backdrop-blur-xl border border-white/10 rounded-3xl p-8 shadow-2xl animate-fade-up" style="animation-delay:.08s">
+    <form method="post" action="/archive" id="archiveForm" class="space-y-6">
+
+      <div class="space-y-2">
+        <label class="text-sm font-medium text-indigo-200">🔗 لینک صفحه</label>
+        <div class="relative">
+          <div class="absolute inset-0 bg-gradient-to-r from-indigo-500/30 to-purple-500/30 rounded-2xl blur opacity-0 focus-within:opacity-100 transition-opacity duration-300"></div>
+          <input type="url" name="url" required placeholder="https://x.com/..."
+            class="relative w-full bg-slate-900/80 border border-white/10 text-white rounded-2xl px-5 py-4 outline-none focus:border-indigo-500/50 focus:ring-2 focus:ring-indigo-500/20 transition-all text-left placeholder-slate-500" dir="ltr"/>
+        </div>
+      </div>
+
+      <div class="bg-slate-900/50 border border-white/8 rounded-2xl p-5 space-y-3">
+        <p class="text-indigo-300 text-sm font-medium">📍 مقصد</p>
+        <div class="flex gap-8">
+          <label class="flex items-center gap-2.5 cursor-pointer">
+            <input type="checkbox" name="save_local" checked/>
+            <span class="text-sm text-slate-300">💾 Local</span>
+          </label>
+          <label class="flex items-center gap-2.5 cursor-pointer">
+            <input type="checkbox" name="save_telegram" id="sendTelegram"/>
+            <span class="text-sm text-slate-300">📨 ارسال به ربات تلگرام</span>
+          </label>
+        </div>
+      </div>
+
+      <button type="submit" id="submitBtn"
+        class="w-full flex justify-center items-center gap-2 py-4 bg-gradient-to-l from-indigo-600 to-purple-600 text-white font-bold rounded-2xl hover:scale-[1.02] transition-transform shadow-[0_0_40px_rgba(99,102,241,.35)] hover:shadow-[0_0_60px_rgba(168,85,247,.5)]">
+        <span id="btnText" class="text-base">🚀 آرشیو کن</span>
+        <svg id="spinner" class="hidden w-5 h-5 animate-spin-slow" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.4 0 0 5.4 0 12h4z"></path>
+        </svg>
+      </button>
+    </form>
+  </section>
+
+  <!-- error -->
+  {% if error %}
+  <div class="bg-red-500/10 border border-red-500/30 rounded-2xl p-5 flex gap-3 animate-fade-up">
+    <span class="text-red-400 text-xl">❌</span>
+    <div>
+      <p class="text-red-300 font-bold mb-1">خطا</p>
+      <p class="text-red-200/80 text-sm">{{ error }}</p>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- result -->
+  {% if result %}
+  <section class="bg-white/[0.04] backdrop-blur-xl border border-emerald-500/25 rounded-3xl p-8 shadow-2xl animate-fade-up space-y-6" style="animation-delay:.1s">
+
+    <div class="flex items-center gap-3 border-b border-white/8 pb-5">
+      <div class="bg-emerald-500/15 text-emerald-400 p-2.5 rounded-xl text-xl">✅</div>
+      <div>
+        <h2 class="text-xl font-bold text-emerald-300">آرشیو با موفقیت انجام شد!</h2>
+        <p class="text-slate-400 text-xs mt-0.5 truncate" dir="ltr">{{ result.url }}</p>
+      </div>
+    </div>
+
+    <!-- links -->
+    <div class="space-y-3 text-sm">
+      <div class="flex items-center gap-3 bg-slate-900/50 rounded-xl px-4 py-3 border border-white/5">
+        <span class="text-slate-400 whitespace-nowrap">🔗 لینک اصلی</span>
+        <a href="{{ result.url }}" target="_blank" dir="ltr"
+          class="text-indigo-400 hover:text-indigo-300 truncate transition-colors">{{ result.url }}</a>
+      </div>
+
+      <div class="flex items-center gap-3 bg-cyan-500/8 rounded-xl px-4 py-3 border border-cyan-500/20">
+        <span class="text-cyan-400 whitespace-nowrap font-medium">🌐 لینک آرشیو</span>
+        <a href="{{ result.archive_link }}" target="_blank" dir="ltr"
+          class="text-cyan-300 hover:text-cyan-200 truncate font-medium transition-colors">{{ result.archive_link }}</a>
+      </div>
+    </div>
+
+    <!-- action buttons -->
+    <div class="grid grid-cols-2 gap-3">
+      <a href="{{ result.archive_link }}" target="_blank"
+        class="flex justify-center items-center gap-2 py-3 bg-cyan-500/10 border border-cyan-500/25 text-cyan-300 rounded-xl font-semibold text-sm hover:bg-cyan-500 hover:text-slate-900 transition-all">
+        👁 مشاهده آرشیو
+      </a>
+      <a href="{{ result.archive_link }}" target="_blank"
+        class="flex justify-center items-center gap-2 py-3 bg-purple-500/10 border border-purple-500/25 text-purple-300 rounded-xl font-semibold text-sm hover:bg-purple-500 hover:text-white transition-all">
+        ⬇️ دانلود HTML
+      </a>
+    </div>
+
+    <!-- screenshot -->
+    {% if result.screenshot_url %}
+    <div class="space-y-3">
+      <p class="text-slate-400 text-sm font-medium">📸 پیش‌نمایش صفحه آرشیو شده</p>
+      <div class="rounded-xl overflow-hidden border border-white/10 shadow-xl">
+        <div class="bg-slate-800/80 px-4 py-2 flex items-center gap-2">
+          <div class="w-3 h-3 rounded-full bg-red-400/80"></div>
+          <div class="w-3 h-3 rounded-full bg-yellow-400/80"></div>
+          <div class="w-3 h-3 rounded-full bg-green-400/80"></div>
+          <span class="text-slate-400 text-xs mr-2 truncate" dir="ltr">{{ result.url }}</span>
+        </div>
+        <img src="{{ result.screenshot_url }}" class="w-full max-h-[420px] object-cover object-top" loading="lazy"/>
+      </div>
+    </div>
+    {% endif %}
+
+  </section>
+  {% endif %}
+
+</main>
+
+<script>
+document.getElementById('archiveForm').addEventListener('submit', function() {
+  document.getElementById('btnText').textContent = '⏳ در حال آرشیو...';
+  document.getElementById('spinner').classList.remove('hidden');
+  document.getElementById('submitBtn').disabled = true;
+});
+</script>
+</body>
 </html>

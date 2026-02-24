@@ -77,16 +77,50 @@ async def do_archive(
                 uploads["local"][key] = f"ERROR: {exc}"
 
     if save_telegram:
-        p = TelegramStorageProvider()
-        files = {"archive.html": artifact.rendered_html_path, "screenshot.png": artifact.screenshot_path}
+        # ارسال به کانال تلگرام از طریق bot
         uploads["telegram"] = {}
-        for key, path in files.items():
-            try:
-                remote_name = f"{artifact.folder.name}_{path.name}"
-                uri = await p.upload_file(path, remote_name)
-                uploads["telegram"][key] = uri
-            except Exception as exc:
-                uploads["telegram"][key] = f"ERROR: {exc}"
+        try:
+            import httpx as _hx
+            TGAPI = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+            target = settings.telegram_chat_id or ""
+            if target:
+                view_link = artifact.public_url or ""
+                # ارسال archive.html
+                async with _hx.AsyncClient(timeout=60) as _tc:
+                    cap = f"📦 archive.html\n🔗 {artifact.url}"
+                    if view_link:
+                        cap += f"\n🌐 {view_link}"
+                    with artifact.rendered_html_path.open("rb") as f2:
+                        r = await _tc.post(f"{TGAPI}/sendDocument",
+                                           data={"chat_id": target, "caption": cap},
+                                           files={"document": (artifact.rendered_html_path.name, f2)})
+                    uploads["telegram"]["archive.html"] = "ok" if r.json().get("ok") else r.json().get("description","err")
+                    # ارسال screenshot
+                    if artifact.screenshot_path.exists() and artifact.screenshot_path.stat().st_size > 1000:
+                        with artifact.screenshot_path.open("rb") as f3:
+                            r2 = await _tc.post(f"{TGAPI}/sendPhoto",
+                                                data={"chat_id": target, "caption": f"📸 {artifact.url}"},
+                                                files={"photo": (artifact.screenshot_path.name, f3)})
+                        uploads["telegram"]["screenshot"] = "ok" if r2.json().get("ok") else r2.json().get("description","err")
+            else:
+                uploads["telegram"]["error"] = "TELEGRAM_CHAT_ID تنظیم نشده"
+        except Exception as exc:
+            uploads["telegram"]["error"] = str(exc)
+
+    # screenshot_url از Supabase برای نمایش در سایت
+    screenshot_url = ""
+    sb_obj = get_supabase()
+    if sb_obj and archive_id:
+        try:
+            async with httpx.AsyncClient(timeout=10) as _sc:
+                _rr = await _sc.get(sb_obj.base + "/rest/v1/archives",
+                                    headers={"apikey": sb_obj.key, "Authorization": "Bearer " + sb_obj.key},
+                                    params={"id": "eq." + archive_id, "select": "screenshot_url"})
+                _rows = _rr.json() if _rr.is_success else []
+                if _rows:
+                    screenshot_url = _rows[0].get("screenshot_url", "")
+        except Exception:
+            pass
 
     manifest = {
         "url": artifact.url,
@@ -94,6 +128,7 @@ async def do_archive(
         "archive_link": artifact.public_url,
         "folder": str(artifact.folder),
         "uploads": uploads,
+        "screenshot_url": screenshot_url,
     }
     (artifact.folder / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -110,18 +145,28 @@ async def view_archive(archive_id: str):
     if sb:
         try:
             async with httpx.AsyncClient(timeout=15) as _c:
-                _h = {"apikey": sb.key, "Authorization": "Bearer " + sb.key}
-                _r = await _c.get(sb.base + "/rest/v1/archives",
-                                  headers=_h,
-                                  params={"id": "eq." + archive_id})
-                rows = _r.json() if _r.is_success else []
-                if rows:
-                    row = rows[0]
+                _h = {"apikey": sb.key, "Authorization": "Bearer " + sb.key,
+                      "Accept": "application/json"}
+                _r = await _c.get(
+                    sb.base + "/rest/v1/archives",
+                    headers=_h,
+                    params={"id": "eq." + archive_id, "limit": "1"}
+                )
+                logger.info("view query status: %s body: %s", _r.status_code, _r.text[:200])
+                if _r.is_success:
+                    rows = _r.json()
+                    if rows and isinstance(rows, list):
+                        row = rows[0]
         except Exception as exc:
             logger.warning("Supabase select failed: %s", exc)
 
     if not row:
-        return HTMLResponse("<h2>آرشیو یافت نشد</h2>", status_code=404)
+        return HTMLResponse("""<!DOCTYPE html><html lang="fa" dir="rtl">
+<head><meta charset="UTF-8"/><title>آرشیو</title>
+<style>body{font-family:sans-serif;background:#060910;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;}</style>
+</head><body><div style="text-align:center"><h2>⚠️ آرشیو یافت نشد</h2>
+<p style="color:#64748b;margin-top:8px">شناسه: """ + archive_id + """</p>
+<a href="/" style="color:#6366f1;margin-top:16px;display:block">برگشت به صفحه اصلی</a></div></body></html>""", status_code=404)
 
     orig_url = row.get("url", "")
     screenshot_url = row.get("screenshot_url", "")
