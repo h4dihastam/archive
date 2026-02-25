@@ -12,31 +12,23 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
-    # Full URL of deployed app for webhook registration
     webhook_url: str = ""
+    public_base_url: str = ""
 
-    bot_password: str = ""  # خالی = بدون رمز
+    bot_password: str = ""
     admin_user_id: int = 6268682882
 
-    # screenshotmachine.com API key (رایگان از screenshotmachine.com)
-    screenshot_machine_key: str = "dd29ad"  # key پیش‌فرض رایگان
+    screenshot_machine_key: str = "dd29ad"
 
-    # Supabase
     supabase_url: str = ""
-    supabase_key: str = ""        # anon/service_role key
+    supabase_key: str = ""
     supabase_bucket: str = "archives"
 
-    # X.com cookies for Playwright auth
     x_cookies: str = ""
-
-    # Public base URL for archive links (defaults to webhook_url)
-    public_base_url: str = ""
 
     @property
     def archive_base(self) -> str:
         return (self.public_base_url or self.webhook_url).rstrip("/")
 
-
-    x_cookies: str = ""
 
 settings = Settings()
