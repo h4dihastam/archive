@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     supabase_key: str = ""        # anon/service_role key
     supabase_bucket: str = "archives"
 
+    # X.com cookies for Playwright auth
+    x_cookies: str = ""
+
     # Public base URL for archive links (defaults to webhook_url)
     public_base_url: str = ""
 
@@ -33,5 +36,7 @@ class Settings(BaseSettings):
     def archive_base(self) -> str:
         return (self.public_base_url or self.webhook_url).rstrip("/")
 
+
+    x_cookies: str = ""
 
 settings = Settings()
