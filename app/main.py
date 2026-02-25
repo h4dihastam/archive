@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import httpx
 import json
 import logging
 from pathlib import Path
@@ -53,11 +52,27 @@ async def do_archive(
 ):
     if not is_valid_url(url):
         return templates.TemplateResponse(
-            "index.html", {"request": request, "error": "URL نامعتبر است.", "result": None}, status_code=400
+            "index.html", 
+            {"request": request, "error": "URL نامعتبر است.", "result": None}, 
+            status_code=400
         )
 
     archiver = Archiver()
-    artifact = await archiver.archive(url)
+    
+    # === فیکس مهم: مدیریت خطا قوی برای جلوگیری از ERR_CONNECTION_CLOSED ===
+    try:
+        artifact = await archiver.archive(url)
+    except Exception as e:
+        logger.exception(f"Archive failed for URL: {url}")
+        return templates.TemplateResponse(
+            "index.html",
+            {
+                "request": request, 
+                "error": f"خطا در آرشیو صفحه: {str(e)[:250]}", 
+                "result": None
+            },
+            status_code=500
+        )
 
     # Save to Supabase (if configured) — get archive_id
     archive_id = await save_archive(artifact)
@@ -78,60 +93,29 @@ async def do_archive(
                 uploads["local"][key] = f"ERROR: {exc}"
 
     if save_telegram:
-        # ارسال به کانال تلگرام از طریق bot
+        p = TelegramStorageProvider()
+        files = {"archive.html": artifact.rendered_html_path, "screenshot.png": artifact.screenshot_path}
         uploads["telegram"] = {}
-        try:
-            import httpx as _hx
-            TGAPI = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
-            target = settings.telegram_chat_id or ""
-            if target:
-                view_link = artifact.public_url or ""
-                # ارسال archive.html
-                async with _hx.AsyncClient(timeout=60) as _tc:
-                    cap = f"📦 archive.html\n🔗 {artifact.url}"
-                    if view_link:
-                        cap += f"\n🌐 {view_link}"
-                    with artifact.rendered_html_path.open("rb") as f2:
-                        r = await _tc.post(f"{TGAPI}/sendDocument",
-                                           data={"chat_id": target, "caption": cap},
-                                           files={"document": (artifact.rendered_html_path.name, f2)})
-                    uploads["telegram"]["archive.html"] = "ok" if r.json().get("ok") else r.json().get("description","err")
-                    # ارسال screenshot
-                    if artifact.screenshot_path.exists() and artifact.screenshot_path.stat().st_size > 1000:
-                        with artifact.screenshot_path.open("rb") as f3:
-                            r2 = await _tc.post(f"{TGAPI}/sendPhoto",
-                                                data={"chat_id": target, "caption": f"📸 {artifact.url}"},
-                                                files={"photo": (artifact.screenshot_path.name, f3)})
-                        uploads["telegram"]["screenshot"] = "ok" if r2.json().get("ok") else r2.json().get("description","err")
-            else:
-                uploads["telegram"]["error"] = "TELEGRAM_CHAT_ID تنظیم نشده"
-        except Exception as exc:
-            uploads["telegram"]["error"] = str(exc)
-
-    # screenshot_url از Supabase برای نمایش در سایت
-    screenshot_url = ""
-    sb_obj = get_supabase()
-    if sb_obj and archive_id:
-        try:
-            async with httpx.AsyncClient(timeout=10) as _sc:
-                _rr = await _sc.get(sb_obj.base + "/rest/v1/archives",
-                                    headers={"apikey": sb_obj.key, "Authorization": "Bearer " + sb_obj.key},
-                                    params={"id": "eq." + archive_id, "select": "screenshot_url"})
-                _rows = _rr.json() if _rr.is_success else []
-                if _rows:
-                    screenshot_url = _rows[0].get("screenshot_url", "")
-        except Exception:
-            pass
+        for key, path in files.items():
+            try:
+                remote_name = f"{artifact.folder.name}_{path.name}"
+                uri = await p.upload_file(path, remote_name)
+                uploads["telegram"][key] = uri
+            except Exception as exc:
+                uploads["telegram"][key] = f"ERROR: {exc}"
 
     manifest = {
         "url": artifact.url,
         "archive_id": archive_id,
         "archive_link": artifact.public_url,
-        "folder": str(artifact.folder),
-        "uploads": uploads,
-        "screenshot_url": screenshot_url,
+        "title": getattr(artifact, 'post_meta', {}).get("title", "") if hasattr(artifact, 'post_meta') else "",
+        "screenshot_url": f"/screenshot/{archive_id}" if artifact.screenshot_path.exists() and artifact.screenshot_path.stat().st_size > 0 else None,
     }
-    (artifact.folder / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    (artifact.folder / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), 
+        encoding="utf-8"
+    )
 
     return templates.TemplateResponse(
         "index.html",
@@ -141,144 +125,57 @@ async def do_archive(
 
 @app.get("/view/{archive_id}", response_class=HTMLResponse)
 async def view_archive(archive_id: str):
-    sb = get_supabase()
+    """نمایش آرشیو کامل"""
+    import httpx as _httpx
+
     row = None
+    html_content = ""
+
+    sb = get_supabase()
     if sb:
         try:
-            import httpx as _httpx
-            async with _httpx.AsyncClient(timeout=15) as _c:
-                _h = {"apikey": sb.key, "Authorization": "Bearer " + sb.key,
-                      "Accept": "application/json"}
-                _r = await _c.get(
-                    sb.base + "/rest/v1/archives",
-                    headers=_h,
-                    params={"id": "eq." + archive_id, "limit": "1"}
-                )
-                logger.info("view query status: %s body: %s", _r.status_code, _r.text[:200])
-                if _r.is_success:
-                    rows = _r.json()
-                    if rows and isinstance(rows, list):
-                        row = rows[0]
+            rows = await sb.select("archives", {"id": archive_id})
+            if rows:
+                row = rows[0]
         except Exception as exc:
             logger.warning("Supabase select failed: %s", exc)
 
-    if not row:
-        return HTMLResponse("""<!DOCTYPE html><html lang="fa" dir="rtl">
-<head><meta charset="UTF-8"/><title>آرشیو</title>
-<style>body{font-family:sans-serif;background:#060910;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;}</style>
-</head><body><div style="text-align:center"><h2>⚠️ آرشیو یافت نشد</h2>
-<p style="color:#64748b;margin-top:8px">شناسه: """ + archive_id + """</p>
-<a href="/" style="color:#6366f1;margin-top:16px;display:block">برگشت به صفحه اصلی</a></div></body></html>""", status_code=404)
+    if row and row.get("html_url"):
+        try:
+            async with _httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                res = await client.get(row["html_url"])
+                if res.status_code == 200:
+                    html_content = res.text
+        except Exception as exc:
+            logger.warning("html fetch failed: %s", exc)
 
-    orig_url = row.get("url", "")
-    screenshot_url = row.get("screenshot_url", "")
-    html_url = row.get("html_url", "")
-    created_at = (row.get("created_at", "") or "")[:19].replace("T", " ")
-    author = row.get("post_author", "") or row.get("post_username", "")
-    if row.get("post_username") and row.get("post_author"):
-        author = row["post_author"] + " (@" + row["post_username"] + ")"
-    elif row.get("post_username"):
-        author = "@" + row["post_username"]
+    if not html_content:
+        data_dir = Path(settings.base_storage_dir)
+        if data_dir.exists():
+            for folder in data_dir.iterdir():
+                manifest_path = folder / "manifest.json"
+                if manifest_path.exists():
+                    try:
+                        m = json.loads(manifest_path.read_text())
+                        if m.get("archive_id") == archive_id:
+                            html_path = folder / "archive.html"
+                            if html_path.exists():
+                                html_content = html_path.read_text(encoding="utf-8")
+                                if not row:
+                                    row = {"url": m.get("url",""), "created_at": ""}
+                    except Exception:
+                        pass
 
-    base = settings.archive_base or ""
-    ss_section = ""
-    if screenshot_url:
-        ss_section = (
-            '<div class="ss-wrap">'
-            '<div class="ss-bar">'
-            '<div class="dot" style="background:#ef4444"></div>'
-            '<div class="dot" style="background:#eab308"></div>'
-            '<div class="dot" style="background:#22c55e"></div>'
-            '</div>'
-            '<img src="' + screenshot_url + '" class="ss-img" alt="screenshot"/>'
-            '</div>'
+    if not html_content:
+        return HTMLResponse(
+            """<html><head><meta charset="UTF-8"/></head>
+            <body style="font-family:sans-serif;padding:60px;text-align:center;background:#0f172a;color:white;">
+            <h2>⚠️ آرشیو یافت نشد</h2>
+            <p><a href="/" style="color:#60a5fa;">برگشت به خانه</a></p></body></html>""",
+            status_code=404,
         )
-    else:
-        ss_section = '<div class="no-ss">📸 اسکرین‌شات موجود نیست</div>'
 
-    base = settings.archive_base or ""
-    web_link = (base + "/web/" + archive_id) if base else ""
-    dl_btn = ('<a href="' + html_url + '" download class="btn btn-dl">⬇️ دانلود HTML</a>') if html_url else ""
-    web_btn = ('<a href="' + web_link + '" target="_blank" class="btn btn-cyan">👁 مشاهده آرشیو وب</a>') if web_link else ""
-    author_span = ('<span class="author">👤 ' + author + '</span>') if author else ""
-    orig_short = orig_url[:70] + ("..." if len(orig_url) > 70 else "")
-
-    page = (
-        "<!DOCTYPE html>"
-        "<html lang='fa' dir='rtl'>"
-        "<head>"
-        "<meta charset='UTF-8'/>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
-        "<title>آرشیو — Archive Hub</title>"
-        "<link href='https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700&display=swap' rel='stylesheet'/>"
-        "<style>"
-        "*{box-sizing:border-box;margin:0;padding:0;}"
-        "body{font-family:'Vazirmatn',sans-serif;background:#060910;color:#e2e8f0;min-height:100vh;}"
-        ".bar{background:#1e3a8a;padding:12px 20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}"
-        ".bar .logo{font-weight:700;color:#fff;font-size:15px;white-space:nowrap;}"
-        ".bar a{color:#93c5fd;font-size:12px;word-break:break-all;text-decoration:none;}"
-        ".bar .date{font-size:11px;color:#bfdbfe;margin-right:auto;white-space:nowrap;}"
-        ".wrap{max-width:900px;margin:24px auto;padding:0 16px;display:flex;flex-direction:column;gap:16px;}"
-        ".card{background:rgba(255,255,255,.05);border:1px solid rgba(99,102,241,.2);border-radius:16px;padding:20px;}"
-        ".meta{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}"
-        ".badge{background:#1d4ed8;color:#fff;border-radius:6px;padding:4px 12px;font-size:12px;font-weight:600;}"
-        ".author{color:#a5b4fc;font-size:14px;}"
-        ".btn{padding:9px 18px;border-radius:10px;font-size:13px;font-weight:600;text-decoration:none;display:inline-block;transition:.2s;}"
-        ".btn-blue{background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.4);color:#a5b4fc;}"
-        ".btn-cyan{background:rgba(6,182,212,.15);border:1px solid rgba(6,182,212,.4);color:#67e8f9;}"
-        ".btn-dl{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3);color:#86efac;}"
-        ".ss-wrap{border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.08);background:#0f172a;}"
-        ".ss-bar{background:#1e293b;padding:8px 12px;display:flex;gap:6px;align-items:center;}"
-        ".dot{width:10px;height:10px;border-radius:50%;}"
-        ".ss-img{width:100%;display:block;max-height:650px;object-fit:cover;object-position:top;}"
-        ".no-ss{padding:40px;text-align:center;color:#475569;font-size:14px;}"
-        "</style>"
-        "</head>"
-        "<body>"
-        "<div class='bar'>"
-        "<span class='logo'>📦 Archive Hub</span>"
-        "<a href='" + orig_url + "' target='_blank'>" + orig_short + "</a>"
-        "<span class='date'>🕐 " + created_at + "</span>"
-        "</div>"
-        "<div class='wrap'>"
-        "<div class='card'>"
-        "<div class='meta'>"
-        "<span class='badge'>✅ آرشیو شده</span>"
-        + author_span +
-        "<a href='" + orig_url + "' target='_blank' class='btn btn-blue'>🔗 لینک اصلی ↗</a>"
-        + web_btn
-        + dl_btn +
-        "</div>"
-        "</div>"
-        "<div class='card'>" + ss_section + "</div>"
-        "</div>"
-        "</body></html>"
-    )
-    return HTMLResponse(page)
-
-
-@app.get("/web/{archive_id}", response_class=HTMLResponse)
-async def view_web_archive(archive_id: str):
-    """نمایش HTML کامل آرشیو شده — مستقیم از Supabase Storage"""
-    sb = get_supabase()
-    if not sb:
-        return HTMLResponse("<h2>سرور در دسترس نیست</h2>", status_code=503)
-    try:
-        async with httpx.AsyncClient(timeout=20) as c:
-            headers = {"apikey": sb.key, "Authorization": "Bearer " + sb.key}
-            r = await c.get(sb.base + "/rest/v1/archives",
-                            headers=headers,
-                            params={"id": "eq." + archive_id, "select": "html_url"})
-            rows = r.json() if r.is_success else []
-            if rows and rows[0].get("html_url"):
-                html_url = rows[0]["html_url"]
-                r2 = await c.get(html_url, follow_redirects=True)
-                if r2.status_code == 200:
-                    return HTMLResponse(r2.text)
-        return HTMLResponse("<h2>فایل آرشیو یافت نشد</h2>", status_code=404)
-    except Exception as exc:
-        logger.warning("web archive failed: %s", exc)
-        return HTMLResponse("<h2>خطا: " + str(exc) + "</h2>", status_code=500)
+    return HTMLResponse(html_content)
 
 
 @app.get("/screenshot/{archive_id}")
@@ -306,6 +203,7 @@ async def bot_webhook(request: Request):
         update = await request.json()
     except Exception:
         return JSONResponse({"ok": False}, status_code=400)
+    
     import asyncio
     from app.bot import handle_update
     asyncio.create_task(handle_update(update))
@@ -318,6 +216,7 @@ async def set_webhook(request: Request):
         return JSONResponse({"error": "TELEGRAM_BOT_TOKEN not set"})
     if not settings.webhook_url:
         return JSONResponse({"error": "WEBHOOK_URL not set"})
+    
     import httpx
     endpoint = f"{settings.webhook_url.rstrip('/')}/bot/webhook"
     async with httpx.AsyncClient(timeout=10) as client:
@@ -326,94 +225,3 @@ async def set_webhook(request: Request):
             json={"url": endpoint},
         )
         return JSONResponse(res.json())
-
-
-# ── Admin Panel ───────────────────────────────────────────────────────────────
-
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_panel(request: Request):
-    return templates.TemplateResponse("admin.html", {
-        "request": request,
-        "admin_password": settings.bot_password or "admin",
-    })
-
-
-def _check_admin(request: Request) -> bool:
-    key = request.headers.get("X-Admin-Key", "")
-    return key == (settings.bot_password or "admin")
-
-
-@app.get("/admin/api/stats")
-async def admin_stats(request: Request):
-    if not _check_admin(request):
-        from fastapi import HTTPException
-        raise HTTPException(403)
-    sb = get_supabase()
-    if not sb:
-        return {"total_archives": 0, "total_users": 0, "file_count": 0, "total_bytes": 0}
-    async with httpx.AsyncClient(timeout=15) as c:
-        headers = {"apikey": sb.key, "Authorization": f"Bearer {sb.key}"}
-        r1 = await c.get(f"{sb.base}/rest/v1/archives",
-                         headers={**headers, "Prefer": "count=exact", "Range-Unit": "items", "Range": "0-0"})
-        total_archives = int((r1.headers.get("content-range","0/?").split("/")[-1]) or 0)
-        r2 = await c.get(f"{sb.base}/rest/v1/bot_users",
-                         headers={**headers, "Prefer": "count=exact", "Range-Unit": "items", "Range": "0-0"})
-        total_users = int((r2.headers.get("content-range","0/?").split("/")[-1]) or 0)
-        r3 = await c.post(f"{sb.base}/rest/v1/rpc/get_storage_stats",
-                          headers={**headers, "Content-Type": "application/json"}, json={})
-        file_count, total_bytes = 0, 0
-        if r3.is_success and r3.json():
-            row = r3.json()[0] if isinstance(r3.json(), list) else r3.json()
-            file_count = int(row.get("file_count", 0) or 0)
-            total_bytes = int(row.get("total_bytes", 0) or 0)
-    return {"total_archives": total_archives, "total_users": total_users,
-            "file_count": file_count, "total_bytes": total_bytes}
-
-
-@app.get("/admin/api/archives")
-async def admin_archives(request: Request):
-    if not _check_admin(request):
-        from fastapi import HTTPException
-        raise HTTPException(403)
-    sb = get_supabase()
-    if not sb:
-        return []
-    async with httpx.AsyncClient(timeout=15) as c:
-        headers = {"apikey": sb.key, "Authorization": f"Bearer {sb.key}"}
-        r = await c.get(f"{sb.base}/rest/v1/archives", headers=headers,
-                        params={"order": "created_at.desc", "limit": "100"})
-        return r.json() if r.is_success else []
-
-
-@app.get("/admin/api/users")
-async def admin_users(request: Request):
-    if not _check_admin(request):
-        from fastapi import HTTPException
-        raise HTTPException(403)
-    sb = get_supabase()
-    if not sb:
-        return []
-    async with httpx.AsyncClient(timeout=15) as c:
-        headers = {"apikey": sb.key, "Authorization": f"Bearer {sb.key}"}
-        r = await c.get(f"{sb.base}/rest/v1/bot_users", headers=headers,
-                        params={"order": "created_at.desc"})
-        return r.json() if r.is_success else []
-
-
-@app.delete("/admin/api/delete/{archive_id}")
-async def admin_delete(archive_id: str, request: Request):
-    if not _check_admin(request):
-        from fastapi import HTTPException
-        raise HTTPException(403)
-    from app.storage.supabase import get_supabase as _gsb
-    sb = _gsb()
-    if not sb:
-        return {"ok": False}
-    async with httpx.AsyncClient(timeout=15) as c:
-        headers = {"apikey": sb.key, "Authorization": f"Bearer {sb.key}"}
-        await c.delete(f"{sb.base}/rest/v1/archives", headers=headers,
-                       params={"id": f"eq.{archive_id}"})
-        for fname in ["archive.html", "raw.html", "screenshot.png"]:
-            await c.delete(f"{sb.base}/storage/v1/object/{sb.bucket}/{archive_id}/{fname}",
-                           headers=headers)
-    return {"ok": True}

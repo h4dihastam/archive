@@ -1,5 +1,6 @@
 """
-Archiver — فیکس کامل اسکرین‌شات سفید + آرشیو کامل صفحه
+Archiver — فیکس نهایی برای Render Free + X.com
+Playwright فقط برای HTML کامل + thum.io برای اسکرین‌شات (بدون تایم‌اوت)
 """
 from __future__ import annotations
 
@@ -7,7 +8,9 @@ import logging
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
+import httpx
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 from app.config import settings
@@ -23,6 +26,19 @@ def _safe_slug(url: str) -> str:
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     return f"{host}_{path}_{ts}"[:100]
 
+async def _get_screenshot(url: str) -> bytes:
+    """thum.io — سریع و مطمئن روی Render Free"""
+    encoded = quote(url, safe="")
+    try:
+        async with httpx.AsyncClient(timeout=25) as c:
+            r = await c.get(f"https://image.thum.io/get/width/1280/crop/900/noanimate/allowJPG/{encoded}")
+            if r.status_code == 200 and len(r.content) > 5000:
+                logger.info(f"✅ اسکرین‌شات از thum.io: {len(r.content)/1024:.1f} KB")
+                return r.content
+    except Exception as e:
+        logger.warning(f"thum.io failed: {e}")
+    return b""
+
 class Archiver:
     async def archive(self, url: str) -> ArchiveArtifact:
         slug = _safe_slug(url)
@@ -35,65 +51,47 @@ class Archiver:
 
         post_meta = {"title": ""}
 
+        # ── ۱. HTML کامل با Playwright (بدون اسکرین‌شات سنگین) ──
+        html_content = ""
+        title = "Archived Page"
+
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-web-security",
-                    "--single-process",
-                ]
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
             )
-
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 1200},
-                device_scale_factor=1,
             )
-
             page = await context.new_page()
 
             try:
-                logger.info(f"→ آرشیو صفحه: {url}")
+                await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+                await page.wait_for_timeout(5000)   # صبر برای JS
 
-                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                await page.wait_for_timeout(6000)  # صبر برای JS و لود محتوا
+                if "x.com" in url.lower() or "twitter.com" in url.lower():
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight/2)")
+                    await page.wait_for_timeout(1500)
 
-                # اسکرول تدریجی برای لود تمام lazy content
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.4)")
-                await page.wait_for_timeout(2000)
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.8)")
-                await page.wait_for_timeout(2000)
-                await page.evaluate("window.scrollTo(0, 0)")
-
-                title = await page.title() or "Archived Page"
+                html_content = await page.content()
+                title = await page.title() or title
                 post_meta["title"] = title
 
-                # === فیکس اصلی: اسکرین‌شات کامل ===
-                await page.screenshot(
-                    path=str(screenshot_path),
-                    full_page=True,
-                    timeout=30000
-                )
-                logger.info(f"✅ اسکرین‌شات گرفته شد: {screenshot_path.stat().st_size / 1024:.1f} KB")
-
-                html_content = await page.content()
-
             except PlaywrightTimeout:
-                logger.warning("Timeout — محتوای موجود رو ذخیره می‌کنم")
+                logger.warning("Timeout HTML — محتوای موجود ذخیره شد")
                 html_content = await page.content()
-                await page.screenshot(path=str(screenshot_path), full_page=True)
             except Exception as e:
-                logger.error(f"خطا در آرشیو {url}: {e}")
+                logger.error(f"HTML error: {e}")
                 html_content = f"<h1>خطا در آرشیو</h1><p>{e}</p>"
-                screenshot_path.write_bytes(b"")
             finally:
                 await browser.close()
 
-        # بنر Archive Hub (مثل archive.is)
+        # ── ۲. اسکرین‌شات از thum.io (سریع و بدون crash) ──
+        screenshot_bytes = await _get_screenshot(url)
+        screenshot_path.write_bytes(screenshot_bytes)
+
+        # ── ۳. بنر Archive Hub مثل archive.is ──
         banner = f'''
 <div style="position:fixed;top:0;left:0;right:0;z-index:999999;background:#1e3a8a;color:white;padding:16px 24px;font-family:system-ui;box-shadow:0 4px 20px rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:space-between;font-size:15px;">
   <div>📦 <strong>Archive Hub</strong> — آرشیو کامل صفحه</div>
