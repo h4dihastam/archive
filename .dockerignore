@@ -1,6 +1,10 @@
 .git
+.gitignore
 .env
-__pycache__/
-*.pyc
+.env.example
 data/
 .venv/
+__pycache__/
+*.pyc
+*.md
+test_*.py

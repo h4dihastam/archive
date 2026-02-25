@@ -11,14 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# نصب کامل Chromium + تمام dependencies (مهم‌ترین خط)
+# Chromium کامل + فونت فارسی
 RUN playwright install --with-deps chromium
 
-# فونت‌های فارسی + انگلیسی برای جلوگیری از سفید شدن
 RUN apt-get update && apt-get install -y \
-    fonts-noto-cjk \
-    fonts-noto-color-emoji \
-    fonts-liberation \
+    fonts-noto-cjk fonts-noto-color-emoji fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 10000
