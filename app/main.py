@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import httpx
 import json
 import logging
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -19,6 +21,9 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title=settings.app_name)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
+
+# وضعیت جابهای در حال پردازش: job_id -> {status, archive_id, error, url}
+_jobs: dict[str, dict] = {}
 
 
 @app.on_event("startup")
@@ -41,7 +46,48 @@ async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request, "result": None, "error": None})
 
 
-@app.post("/archive", response_class=HTMLResponse)
+# ────────────────────────────────────────────────────────────────────────────
+# تابع background آرشیو
+# ────────────────────────────────────────────────────────────────────────────
+async def _run_archive(job_id: str, url: str, send_telegram: bool):
+    _jobs[job_id] = {"status": "running", "url": url, "archive_id": None, "error": None}
+    try:
+        artifact = await Archiver().archive(url)
+        archive_id = await save_archive(artifact)
+        artifact.archive_id = archive_id
+        artifact.public_url = f"{settings.archive_base}/view/{archive_id}"
+
+        # ارسال به تلگرام
+        if send_telegram and settings.telegram_bot_token and settings.telegram_chat_id:
+            try:
+                TGAPI = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+                target = settings.telegram_chat_id
+                async with httpx.AsyncClient(timeout=60) as tc:
+                    cap = f"📦 archive.html\n🔗 {url}\n🌐 {artifact.public_url}"
+                    with artifact.rendered_html_path.open("rb") as f:
+                        await tc.post(f"{TGAPI}/sendDocument",
+                                      data={"chat_id": target, "caption": cap},
+                                      files={"document": ("archive.html", f)})
+                    if artifact.screenshot_path.exists() and artifact.screenshot_path.stat().st_size > 2000:
+                        with artifact.screenshot_path.open("rb") as f:
+                            await tc.post(f"{TGAPI}/sendPhoto",
+                                          data={"chat_id": target, "caption": f"📸 {url}"},
+                                          files={"photo": ("screenshot.png", f)})
+            except Exception as e:
+                logger.warning("Telegram send failed: %s", e)
+
+        _jobs[job_id] = {"status": "done", "url": url, "archive_id": archive_id, "error": None}
+        logger.info("Job %s done: %s", job_id, archive_id)
+
+    except Exception as e:
+        logger.exception("Job %s failed: %s", job_id, url)
+        _jobs[job_id] = {"status": "error", "url": url, "archive_id": None, "error": str(e)[:300]}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# POST /archive — فوری redirect به صفحه انتظار
+# ────────────────────────────────────────────────────────────────────────────
+@app.post("/archive")
 async def do_archive(
     request: Request,
     url: str = Form(...),
@@ -55,76 +101,142 @@ async def do_archive(
             status_code=400,
         )
 
-    try:
-        artifact = await Archiver().archive(url)
-    except Exception as e:
-        logger.exception("Archive failed: %s", url)
-        return templates.TemplateResponse(
-            "index.html",
-            {"request": request, "error": f"خطا در آرشیو: {str(e)[:200]}", "result": None},
-            status_code=500,
-        )
+    job_id = str(uuid.uuid4())[:8]
+    # آرشیو در background — بلافاصله redirect می‌کنیم
+    asyncio.create_task(_run_archive(job_id, url, save_telegram))
 
-    archive_id = await save_archive(artifact)
-    artifact.archive_id = archive_id
-    artifact.public_url = f"{settings.archive_base}/view/{archive_id}"
-
-    # ارسال به تلگرام از سایت
-    if save_telegram:
-        try:
-            TGAPI = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
-            target = settings.telegram_chat_id
-            if target:
-                async with httpx.AsyncClient(timeout=60) as tc:
-                    cap = f"📦 archive.html\n🔗 {url}\n🌐 {artifact.public_url}"
-                    with artifact.rendered_html_path.open("rb") as f:
-                        await tc.post(f"{TGAPI}/sendDocument",
-                                      data={"chat_id": target, "caption": cap},
-                                      files={"document": ("archive.html", f)})
-                    if artifact.screenshot_path.exists() and artifact.screenshot_path.stat().st_size > 2000:
-                        with artifact.screenshot_path.open("rb") as f:
-                            await tc.post(f"{TGAPI}/sendPhoto",
-                                          data={"chat_id": target, "caption": f"📸 {url}"},
-                                          files={"photo": ("screenshot.png", f)})
-        except Exception as e:
-            logger.warning("Telegram send failed: %s", e)
-
-    # screenshot_url برای نمایش در سایت — از Supabase
-    screenshot_url = ""
-    sb = get_supabase()
-    if sb and archive_id:
-        try:
-            async with httpx.AsyncClient(timeout=10) as c:
-                r = await c.get(
-                    sb.base + "/rest/v1/archives",
-                    headers={"apikey": sb.key, "Authorization": "Bearer " + sb.key},
-                    params={"id": "eq." + archive_id, "select": "screenshot_url"},
-                )
-                rows = r.json() if r.is_success else []
-                if rows:
-                    screenshot_url = rows[0].get("screenshot_url", "")
-        except Exception:
-            pass
-
-    # fallback: local screenshot endpoint
-    if not screenshot_url and artifact.screenshot_path.exists() and artifact.screenshot_path.stat().st_size > 2000:
-        screenshot_url = f"/screenshot/{archive_id}"
-
-    manifest = {
-        "url": url,
-        "archive_id": archive_id,
-        "archive_link": artifact.public_url,
-        "screenshot_url": screenshot_url,
-    }
-    (artifact.folder / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-
-    return templates.TemplateResponse("index.html", {"request": request, "error": None, "result": manifest})
+    return RedirectResponse(f"/status/{job_id}", status_code=303)
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# /view/{id} — صفحه متادیتا + screenshot + دکمه‌ها
+# GET /status/{job_id} — صفحه انتظار با polling
+# ────────────────────────────────────────────────────────────────────────────
+@app.get("/status/{job_id}", response_class=HTMLResponse)
+async def job_status_page(job_id: str):
+    job = _jobs.get(job_id, {})
+    url = job.get("url", "")
+    base = settings.archive_base or ""
+
+    page = f"""<!DOCTYPE html>
+<html lang='fa' dir='rtl'>
+<head>
+<meta charset='UTF-8'/>
+<meta name='viewport' content='width=device-width,initial-scale=1'/>
+<title>آرشیو در حال پردازش</title>
+<link href='https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;700&display=swap' rel='stylesheet'/>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;}}
+body{{font-family:'Vazirmatn',sans-serif;background:#060910;color:#e2e8f0;min-height:100vh;
+  display:flex;align-items:center;justify-content:center;}}
+.card{{background:rgba(255,255,255,.05);border:1px solid rgba(99,102,241,.25);
+  border-radius:24px;padding:48px;max-width:540px;width:90%;text-align:center;}}
+.spinner{{width:56px;height:56px;border:4px solid rgba(99,102,241,.2);
+  border-top-color:#6366f1;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 24px;}}
+@keyframes spin{{to{{transform:rotate(360deg);}}}}
+h2{{font-size:1.5rem;margin-bottom:10px;}}
+.sub{{color:#64748b;font-size:.9rem;margin-bottom:24px;direction:ltr;word-break:break-all;}}
+.progress{{background:rgba(255,255,255,.08);border-radius:999px;height:6px;overflow:hidden;margin:20px 0;}}
+.progress-fill{{height:100%;background:linear-gradient(90deg,#6366f1,#a855f7);
+  animation:progress 2s ease-in-out infinite;border-radius:999px;}}
+@keyframes progress{{0%{{width:15%;margin-right:85%;}}50%{{width:70%;margin-right:0%;}}100%{{width:15%;margin-right:85%;}}}}
+.result-box{{background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.25);
+  border-radius:16px;padding:20px;margin-top:20px;display:none;}}
+.error-box{{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);
+  border-radius:16px;padding:20px;margin-top:20px;display:none;color:#fca5a5;}}
+.link-btn{{display:inline-block;margin-top:14px;padding:12px 28px;
+  background:linear-gradient(90deg,#6366f1,#a855f7);color:#fff;text-decoration:none;
+  border-radius:12px;font-weight:700;font-size:.95rem;}}
+.back-link{{color:#6366f1;text-decoration:none;font-size:.85rem;margin-top:16px;display:block;}}
+#status-text{{color:#a5b4fc;font-size:.9rem;margin-top:8px;}}
+</style>
+</head>
+<body>
+<div class='card'>
+  <div id='spinner-wrap'>
+    <div class='spinner'></div>
+    <h2>⏳ در حال آرشیو...</h2>
+    <p class='sub'>{url[:60]}{'...' if len(url)>60 else ''}</p>
+    <div class='progress'><div class='progress-fill'></div></div>
+    <div id='status-text'>لطفاً صبر کنید — معمولاً ۱۵-۴۵ ثانیه طول می‌کشد</div>
+  </div>
+  <div class='result-box' id='result-box'>
+    <div style='font-size:1.4rem;margin-bottom:8px;'>✅ آرشیو شد!</div>
+    <div id='result-url' style='color:#64748b;font-size:.85rem;direction:ltr;word-break:break-all;'></div>
+    <a id='view-link' href='#' class='link-btn'>👁 مشاهده آرشیو</a>
+  </div>
+  <div class='error-box' id='error-box'>
+    <div style='font-size:1.2rem;margin-bottom:8px;'>❌ خطا در آرشیو</div>
+    <div id='error-msg' style='font-size:.85rem;'></div>
+  </div>
+  <a href='/' class='back-link'>← برگشت به صفحه اصلی</a>
+</div>
+
+<script>
+const jobId = '{job_id}';
+const base = '{base}';
+let attempts = 0;
+
+async function poll() {{
+  attempts++;
+  try {{
+    const r = await fetch('/api/job/' + jobId);
+    const d = await r.json();
+    
+    if (d.status === 'done' && d.archive_id) {{
+      document.getElementById('spinner-wrap').style.display = 'none';
+      const box = document.getElementById('result-box');
+      box.style.display = 'block';
+      document.getElementById('result-url').textContent = d.url;
+      document.getElementById('view-link').href = base + '/view/' + d.archive_id;
+      return;
+    }}
+    
+    if (d.status === 'error') {{
+      document.getElementById('spinner-wrap').style.display = 'none';
+      const box = document.getElementById('error-box');
+      box.style.display = 'block';
+      document.getElementById('error-msg').textContent = d.error || 'خطای ناشناخته';
+      return;
+    }}
+    
+    // هنوز در حال پردازش
+    if (attempts > 2) {{
+      document.getElementById('status-text').textContent = 
+        'در حال پردازش... (' + attempts*3 + ' ثانیه)';
+    }}
+    
+    // max 3 minutes
+    if (attempts < 60) {{
+      setTimeout(poll, 3000);
+    }} else {{
+      document.getElementById('status-text').textContent = 'زمان بیش از حد طول کشید. صفحه را refresh کنید.';
+    }}
+  }} catch(e) {{
+    if (attempts < 60) setTimeout(poll, 4000);
+  }}
+}}
+
+// شروع polling بعد از 3 ثانیه
+setTimeout(poll, 3000);
+</script>
+</body>
+</html>"""
+    return HTMLResponse(page)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# GET /api/job/{id} — وضعیت job برای polling
+# ────────────────────────────────────────────────────────────────────────────
+@app.get("/api/job/{job_id}")
+async def get_job_status(job_id: str):
+    job = _jobs.get(job_id)
+    if not job:
+        return JSONResponse({"status": "not_found"}, status_code=404)
+    return JSONResponse(job)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# /view/{id}
 # ────────────────────────────────────────────────────────────────────────────
 @app.get("/view/{archive_id}", response_class=HTMLResponse)
 async def view_archive(archive_id: str):
@@ -143,13 +255,13 @@ async def view_archive(archive_id: str):
                     },
                     params={"id": "eq." + archive_id, "limit": "1"},
                 )
-                logger.info("view_archive status=%s body=%s", r.status_code, r.text[:300])
+                logger.info("view_archive status=%s body=%s", r.status_code, r.text[:200])
                 if r.is_success and r.json():
                     row = r.json()[0]
         except Exception as e:
             logger.warning("view_archive DB error: %s", e)
 
-    # fallback: جستجو در فایل‌های local
+    # fallback: local
     if not row:
         data_dir = Path(settings.base_storage_dir)
         if data_dir.exists():
@@ -160,7 +272,8 @@ async def view_archive(archive_id: str):
                         m = json.loads(mf.read_text())
                         if m.get("archive_id") == archive_id:
                             row = {"url": m.get("url", ""), "created_at": "",
-                                   "screenshot_url": "", "html_url": ""}
+                                   "screenshot_url": m.get("screenshot_url", ""),
+                                   "html_url": ""}
                     except Exception:
                         pass
 
@@ -234,11 +347,9 @@ body{{font-family:'Vazirmatn',sans-serif;background:#060910;color:#e2e8f0;min-he
 .author{{color:#a5b4fc;font-size:14px;}}
 .btn{{padding:10px 20px;border-radius:10px;font-size:13px;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:6px;transition:.2s;}}
 .btn-blue{{background:rgba(99,102,241,.15);border:1px solid rgba(99,102,241,.4);color:#a5b4fc;}}
-.btn-blue:hover{{background:rgba(99,102,241,.3);}}
 .btn-cyan{{background:rgba(6,182,212,.15);border:1px solid rgba(6,182,212,.4);color:#67e8f9;}}
 .btn-cyan:hover{{background:rgba(6,182,212,.3);}}
 .btn-green{{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3);color:#86efac;}}
-.btn-green:hover{{background:rgba(34,197,94,.25);}}
 .ss-wrap{{border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.08);background:#0f172a;}}
 .ss-bar{{background:#1e293b;padding:8px 12px;display:flex;gap:6px;align-items:center;}}
 .dot{{width:10px;height:10px;border-radius:50%;flex-shrink:0;}}
@@ -266,12 +377,11 @@ body{{font-family:'Vazirmatn',sans-serif;background:#060910;color:#e2e8f0;min-he
 </div>
 </body>
 </html>"""
-
     return HTMLResponse(page)
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# /web/{id} — HTML کامل آرشیو شده
+# /web/{id} — HTML کامل
 # ────────────────────────────────────────────────────────────────────────────
 @app.get("/web/{archive_id}", response_class=HTMLResponse)
 async def view_web_archive(archive_id: str):
@@ -290,13 +400,11 @@ async def view_web_archive(archive_id: str):
                     },
                     params={"id": "eq." + archive_id, "select": "html_url", "limit": "1"},
                 )
-                logger.info("web_archive status=%s body=%s", r.status_code, r.text[:200])
                 if r.is_success and r.json():
                     html_url = r.json()[0].get("html_url", "")
         except Exception as e:
             logger.warning("web_archive DB error: %s", e)
 
-    # دانلود HTML از Supabase Storage
     if html_url:
         try:
             async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
@@ -306,7 +414,7 @@ async def view_web_archive(archive_id: str):
         except Exception as e:
             logger.warning("html fetch error: %s", e)
 
-    # fallback: فایل local
+    # fallback: local
     data_dir = Path(settings.base_storage_dir)
     if data_dir.exists():
         for folder in data_dir.iterdir():
@@ -325,16 +433,12 @@ async def view_web_archive(archive_id: str):
         "<html dir='rtl'><head><meta charset='UTF-8'/></head>"
         "<body style='font-family:sans-serif;padding:40px;background:#060910;color:#e2e8f0;text-align:center;'>"
         "<h2>⚠️ فایل آرشیو یافت نشد</h2>"
-        f"<p style='color:#64748b;margin-top:8px'>{archive_id}</p>"
         f"<a href='/view/{archive_id}' style='color:#6366f1;margin-top:16px;display:block'>برگشت به صفحه آرشیو</a>"
         "</body></html>",
         status_code=404,
     )
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# /screenshot/{id} — local fallback
-# ────────────────────────────────────────────────────────────────────────────
 @app.get("/screenshot/{archive_id}")
 async def view_screenshot(archive_id: str):
     data_dir = Path(settings.base_storage_dir)
@@ -353,16 +457,12 @@ async def view_screenshot(archive_id: str):
     return Response(status_code=404)
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Bot webhook
-# ────────────────────────────────────────────────────────────────────────────
 @app.post("/bot/webhook")
 async def bot_webhook(request: Request):
     try:
         update = await request.json()
     except Exception:
         return JSONResponse({"ok": False}, status_code=400)
-    import asyncio
     from app.bot import handle_update
     asyncio.create_task(handle_update(update))
     return JSONResponse({"ok": True})
