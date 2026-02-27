@@ -1,5 +1,6 @@
 """
-Archiver نهایی — X.com با oEmbed + Microlink + thum.io screenshot
+Archiver نهایی — X.com با oEmbed inline + Microlink + thum.io
+محتوا کامل inline ذخیره میشه — حتی اگه پست پاک بشه
 """
 from __future__ import annotations
 
@@ -50,7 +51,7 @@ def _get_x_cookies() -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Screenshot — thum.io (رایگان، بدون محدودیت)
+# Screenshot
 # ─────────────────────────────────────────────────────────────────────────────
 async def _screenshot(url: str) -> bytes:
     encoded = quote(url, safe="")
@@ -65,7 +66,7 @@ async def _screenshot(url: str) -> bytes:
                 r = await c.get(ss_url)
                 ct = r.headers.get("content-type", "")
                 if r.status_code == 200 and "image" in ct and len(r.content) > 8_000:
-                    logger.info("screenshot OK: %d bytes from %s", len(r.content), ss_url[:50])
+                    logger.info("screenshot OK: %d bytes", len(r.content))
                     return r.content
             except Exception as e:
                 logger.warning("screenshot candidate failed: %s", e)
@@ -73,43 +74,81 @@ async def _screenshot(url: str) -> bytes:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# X.com محتوا — oEmbed + Microlink (بدون Playwright)
+# X.com — دریافت محتوای کامل
 # ─────────────────────────────────────────────────────────────────────────────
 async def _fetch_x_content(url: str) -> dict:
     """
-    برمی‌گردونه: {html, title, author, text, media_url}
+    محتوا رو از چند API می‌گیره و inline ذخیره می‌کنه
+    برمی‌گردونه: {author, text, date, media_urls, tweet_id, found}
     """
-    result = {"html": "", "title": "", "author": "", "text": "", "media_url": ""}
+    result = {
+        "found": False,
+        "author": "",
+        "author_handle": "",
+        "text": "",
+        "date": "",
+        "media_urls": [],
+        "tweet_id": "",
+        "profile_image": "",
+    }
 
-    # ۱. Twitter oEmbed API — رایگان و بدون auth
+    # tweet ID از URL
+    m = re.search(r'/status/(\d+)', url)
+    if m:
+        result["tweet_id"] = m.group(1)
+
+    # ── ۱. Twitter oEmbed — متن و اطلاعات نویسنده ─────────────────────
     try:
         oembed_url = f"https://publish.twitter.com/oembed?url={quote(url)}&dnt=true&omit_script=true"
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
             r = await c.get(oembed_url)
             if r.status_code == 200:
                 data = r.json()
-                result["html"] = data.get("html", "")
+                raw_html = data.get("html", "")
                 result["author"] = data.get("author_name", "")
-                result["title"] = f"پست از {data.get('author_name', '')}"
-                logger.info("oEmbed OK: author=%s", result["author"])
-                return result
+                result["author_handle"] = data.get("author_url", "").split("/")[-1] if data.get("author_url") else ""
+
+                # استخراج متن از blockquote
+                text_match = re.search(r'<blockquote[^>]*>\s*<p[^>]*>(.*?)</p>', raw_html, re.DOTALL)
+                if text_match:
+                    raw_text = text_match.group(1)
+                    # پاک کردن تگ‌های HTML
+                    result["text"] = re.sub(r'<[^>]+>', '', raw_text).strip()
+
+                # تاریخ
+                date_match = re.search(r'<a[^>]+>([A-Za-z]+ \d+, \d+)</a>', raw_html)
+                if date_match:
+                    result["date"] = date_match.group(1)
+
+                result["found"] = True
+                logger.info("oEmbed OK: @%s — %s", result["author_handle"], result["text"][:50])
     except Exception as e:
         logger.warning("oEmbed failed: %s", e)
 
-    # ۲. Microlink API — رایگان ۱۰۰۰ req/day
+    # ── ۲. Microlink — تصاویر و اطلاعات بیشتر ────────────────────────
     try:
         ml_url = f"https://api.microlink.io/?url={quote(url)}&meta=true&screenshot=false"
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
             r = await c.get(ml_url)
             if r.status_code == 200:
                 data = r.json().get("data", {})
-                result["title"] = data.get("title", "")
-                result["text"] = data.get("description", "")
-                result["author"] = data.get("author", "")
-                if data.get("image", {}).get("url"):
-                    result["media_url"] = data["image"]["url"]
-                logger.info("Microlink OK: title=%s", result["title"][:60])
-                return result
+
+                if not result["text"] and data.get("description"):
+                    result["text"] = data["description"]
+                if not result["author"] and data.get("author"):
+                    result["author"] = data["author"]
+                if not result["date"] and data.get("date"):
+                    result["date"] = data["date"][:10]
+
+                # تصاویر
+                img = data.get("image", {})
+                if img and img.get("url"):
+                    result["media_urls"].append(img["url"])
+
+                if not result["found"] and (result["text"] or result["author"]):
+                    result["found"] = True
+
+                logger.info("Microlink OK: %s", data.get("title", "")[:60])
     except Exception as e:
         logger.warning("Microlink failed: %s", e)
 
@@ -117,72 +156,128 @@ async def _fetch_x_content(url: str) -> dict:
 
 
 def _build_x_html(url: str, data: dict) -> str:
-    """HTML زیبا برای توییت وقتی Playwright بلاک شد"""
-    oembed_html = data.get("html", "")
-    author = data.get("author", "")
-    title = data.get("title", "پست آرشیو شده")
+    """
+    HTML کامل inline — همه محتوا داخل HTML ذخیره میشه
+    وقتی پست پاک بشه هم نشون میده
+    """
+    author = data.get("author", "ناشناس")
+    handle = data.get("author_handle", "")
     text = data.get("text", "")
-    media_url = data.get("media_url", "")
+    date = data.get("date", "")
+    media_urls = data.get("media_urls", [])
+    tweet_id = data.get("tweet_id", "")
+    found = data.get("found", False)
     now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
-    media_section = f'<img src="{media_url}" style="width:100%;border-radius:12px;margin-top:16px;" alt="media"/>' if media_url else ""
+    # نمایش زمان آرشیو
+    archive_time = datetime.now(UTC).strftime("%d %B %Y — %H:%M UTC")
 
-    if oembed_html:
-        # oEmbed HTML کامله — فقط wrap می‌کنیم
-        content_section = f"""
-        <div style="display:flex;justify-content:center;">
-          <div style="max-width:550px;width:100%;">
-            {oembed_html}
-            <script async src="https://platform.twitter.com/widgets.js" charset="utf-8"></script>
-          </div>
+    # اگه اصلاً چیزی پیدا نشد
+    if not found or not text:
+        status_html = f"""
+        <div class="not-found-note">
+          ⚠️ محتوای این پست در زمان آرشیو در دسترس نبود یا پاک شده بود.<br/>
+          <a href="{url}" target="_blank" style="color:#60a5fa;">🔗 تلاش برای دیدن پست اصلی</a>
         </div>"""
     else:
-        content_section = f"""
-        <div class="tweet-card">
-          {f'<div class="author">👤 {author}</div>' if author else ''}
-          {f'<p class="tweet-text">{text}</p>' if text else ''}
-          {media_section}
-          <a href="{url}" target="_blank" class="orig-link">🔗 مشاهده پست اصلی در X.com</a>
-        </div>"""
+        status_html = ""
+
+    # تصاویر
+    media_html = ""
+    for img_url in media_urls[:4]:
+        media_html += f'<img src="{img_url}" class="media-img" alt="media" onerror="this.style.display=\'none\'"/>'
+
+    # متن پست
+    text_escaped = text.replace("<", "&lt;").replace(">", "&gt;")
+    # لینک‌های توییتر آبی
+    text_linked = re.sub(r'(https?://\S+)', r'<a href="\1" target="_blank" style="color:#60a5fa;">\1</a>', text_escaped)
+    text_linked = re.sub(r'(@\w+)', r'<a href="https://x.com/\1" target="_blank" style="color:#60a5fa;">\1</a>', text_linked)
+    text_linked = re.sub(r'(#\w+)', r'<a href="https://x.com/hashtag/\1" target="_blank" style="color:#60a5fa;">\1</a>', text_linked)
+
+    handle_html = f'<span class="handle">@{handle}</span>' if handle else ""
+    date_html = f'<span class="date">📅 {date}</span>' if date else ""
+    id_html = f'<span class="tweet-id">ID: {tweet_id}</span>' if tweet_id else ""
 
     return f"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>{title} — Archive Hub</title>
+<title>پست {author} — Archive Hub</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0;}}
-body{{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;
-  min-height:100vh;padding:80px 16px 40px;}}
+body{{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;
+  color:#e2e8f0;min-height:100vh;padding:72px 16px 48px;}}
 .banner{{position:fixed;top:0;left:0;right:0;z-index:9999;background:#1e40af;
-  color:#fff;padding:12px 20px;display:flex;align-items:center;gap:12px;
-  box-shadow:0 2px 12px rgba(0,0,0,.5);font-size:14px;flex-wrap:wrap;}}
+  color:#fff;padding:11px 20px;display:flex;align-items:center;gap:10px;
+  box-shadow:0 2px 12px rgba(0,0,0,.5);font-size:13px;flex-wrap:wrap;}}
 .banner strong{{white-space:nowrap;}}
-.banner .date{{color:#bfdbfe;font-size:12px;}}
-.banner a{{color:#93c5fd;text-decoration:none;margin-right:auto;font-size:12px;}}
-.tweet-card{{max-width:600px;margin:0 auto;background:#1e293b;
-  border-radius:16px;padding:28px;box-shadow:0 8px 32px rgba(0,0,0,.4);}}
-.author{{color:#60a5fa;font-size:1rem;margin-bottom:14px;}}
-.tweet-text{{font-size:1.1rem;line-height:1.7;color:#e2e8f0;margin-bottom:20px;}}
-.orig-link{{display:inline-block;margin-top:20px;padding:10px 24px;
-  background:#1d4ed8;color:#fff;border-radius:10px;text-decoration:none;
-  font-weight:600;font-size:.9rem;}}
-.orig-link:hover{{background:#2563eb;}}
-.archive-note{{max-width:600px;margin:20px auto 0;padding:12px 16px;
-  background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.25);
-  border-radius:10px;font-size:.8rem;color:#94a3b8;text-align:center;}}
+.banner .bdate{{color:#bfdbfe;font-size:11px;}}
+.banner a{{color:#93c5fd;text-decoration:none;margin-right:auto;font-size:11px;}}
+.container{{max-width:620px;margin:0 auto;}}
+.tweet-card{{background:#1e293b;border-radius:16px;padding:24px;
+  box-shadow:0 8px 32px rgba(0,0,0,.4);border:1px solid rgba(99,102,241,.15);}}
+.tweet-header{{display:flex;align-items:flex-start;gap:12px;margin-bottom:16px;}}
+.avatar{{width:48px;height:48px;border-radius:50%;background:#334155;
+  display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;}}
+.author-info .name{{font-weight:700;font-size:1rem;color:#f1f5f9;}}
+.handle{{color:#64748b;font-size:.88rem;}}
+.verified{{color:#1d9bf0;margin-right:4px;}}
+.tweet-text{{font-size:1rem;line-height:1.7;color:#e2e8f0;margin-bottom:16px;
+  white-space:pre-wrap;word-break:break-word;}}
+.media-img{{width:100%;border-radius:12px;margin-top:12px;display:block;
+  max-height:500px;object-fit:cover;}}
+.tweet-footer{{margin-top:16px;padding-top:14px;border-top:1px solid rgba(255,255,255,.06);
+  display:flex;flex-wrap:wrap;gap:8px;align-items:center;}}
+.date{{color:#64748b;font-size:.82rem;}}
+.tweet-id{{color:#475569;font-size:.75rem;}}
+.orig-link{{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;
+  background:rgba(29,155,240,.15);border:1px solid rgba(29,155,240,.3);
+  color:#38bdf8;border-radius:20px;text-decoration:none;font-size:.85rem;
+  font-weight:600;margin-right:auto;transition:.2s;}}
+.orig-link:hover{{background:rgba(29,155,240,.25);}}
+.archive-badge{{margin-top:16px;padding:10px 14px;
+  background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.18);
+  border-radius:10px;font-size:.75rem;color:#94a3b8;text-align:center;}}
+.not-found-note{{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);
+  border-radius:12px;padding:16px;text-align:center;color:#fca5a5;font-size:.9rem;
+  margin-bottom:16px;line-height:1.7;}}
 </style>
 </head>
 <body>
 <div class="banner">
   <strong>📦 Archive Hub</strong>
-  <span class="date">{now_str}</span>
+  <span class="bdate">{now_str}</span>
   <a href="{url}" target="_blank">🔗 لینک اصلی ↗</a>
 </div>
-{content_section}
-<div class="archive-note">
-  این صفحه توسط Archive Hub آرشیو شده است — {now_str}
+
+<div class="container">
+  {status_html}
+  <div class="tweet-card">
+    <div class="tweet-header">
+      <div class="avatar">🐦</div>
+      <div class="author-info">
+        <div class="name">{author} <span class="verified">✓</span></div>
+        {handle_html}
+      </div>
+    </div>
+
+    {"<p class='tweet-text'>" + text_linked + "</p>" if text_linked else ""}
+    {media_html}
+
+    <div class="tweet-footer">
+      {date_html}
+      {id_html}
+      <a href="{url}" target="_blank" class="orig-link">
+        𝕏 مشاهده در X.com
+      </a>
+    </div>
+  </div>
+
+  <div class="archive-badge">
+    🗄 آرشیو شده توسط Archive Hub — {archive_time}<br/>
+    این محتوا به صورت offline ذخیره شده است
+  </div>
 </div>
 </body>
 </html>"""
@@ -206,9 +301,6 @@ def _add_banner(html: str, url: str) -> str:
     return banner + html
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HTML با Playwright (برای سایت‌های غیر X)
-# ─────────────────────────────────────────────────────────────────────────────
 async def _playwright_html(url: str, use_x_cookies: bool = False) -> str:
     try:
         from playwright.async_api import async_playwright
@@ -228,11 +320,9 @@ async def _playwright_html(url: str, use_x_cookies: bool = False) -> str:
                 ),
                 viewport={"width": 1280, "height": 900},
             )
-
             await context.add_init_script(
                 "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
             )
-
             if use_x_cookies:
                 cookies = _get_x_cookies()
                 if cookies:
@@ -251,8 +341,7 @@ async def _playwright_html(url: str, use_x_cookies: bool = False) -> str:
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=35000)
                 await page.wait_for_timeout(5000)
-                html = await page.content()
-                return html
+                return await page.content()
             except Exception as e:
                 logger.warning("Playwright page error: %s", e)
                 return ""
@@ -280,34 +369,37 @@ class Archiver:
         post_meta: dict = {}
         is_twitter = _is_twitter(url)
 
-        # ── Screenshot — همیشه اول (سریع‌تره) ──────────────────────────
+        # ── Screenshot ─────────────────────────────────────────────────
         screenshot_bytes = await _screenshot(url)
         screenshot_path.write_bytes(screenshot_bytes)
 
-        # ── HTML ────────────────────────────────────────────────────────
+        # ── HTML ───────────────────────────────────────────────────────
         if is_twitter:
-            # اول Playwright با کوکی امتحان کن
+            # اول کوکی امتحان
             has_cookies = bool(_get_x_cookies())
-            html_content = ""
+            playwright_html = ""
 
             if has_cookies:
-                html_content = await _playwright_html(url, use_x_cookies=True)
-                if _is_blocked(html_content) or len(html_content) < 3000:
-                    logger.warning("X.com blocked Playwright (with cookies) → using API fallback")
-                    html_content = ""
+                playwright_html = await _playwright_html(url, use_x_cookies=True)
+                if _is_blocked(playwright_html) or len(playwright_html) < 3000:
+                    logger.warning("Playwright blocked → API fallback")
+                    playwright_html = ""
 
-            if not html_content:
-                # API fallback — همیشه کار می‌کنه
+            if playwright_html:
+                # Playwright موفق شد
+                post_meta["title"] = re.search(r'<title>(.*?)</title>', playwright_html, re.IGNORECASE)
+                post_meta["title"] = post_meta["title"].group(1) if post_meta.get("title") else ""
+                raw_html = playwright_html
+                rendered_html = _add_banner(playwright_html, url)
+            else:
+                # API fallback — محتوا inline ذخیره میشه
                 x_data = await _fetch_x_content(url)
                 post_meta["author"] = x_data.get("author", "")
-                post_meta["title"] = x_data.get("title", "")
-                html_content = _build_x_html(url, x_data)
-
-            raw_html = html_content
-            rendered_html = html_content  # بنر داخل _build_x_html هست
+                post_meta["title"] = f"پست {x_data.get('author', '')} — {x_data.get('text', '')[:60]}"
+                rendered_html = _build_x_html(url, x_data)
+                raw_html = rendered_html
 
         else:
-            # سایت‌های دیگه — Playwright معمولی
             html_content = await _playwright_html(url)
             if not html_content or len(html_content) < 500:
                 try:
@@ -317,11 +409,9 @@ class Archiver:
                         html_content = r.text
                 except Exception as e:
                     html_content = f"<h2>خطا</h2><p>{url}</p><p>{e}</p>"
-
             raw_html = html_content
             rendered_html = _add_banner(html_content, url)
 
-        # ── ذخیره ──────────────────────────────────────────────────────
         raw_html_path.write_text(raw_html, encoding="utf-8")
         rendered_html_path.write_text(rendered_html, encoding="utf-8")
 
